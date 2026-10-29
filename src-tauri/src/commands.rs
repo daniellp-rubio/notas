@@ -198,7 +198,10 @@ pub fn get_note(state: State<'_, AppState>, id: String) -> Result<NoteView, Stri
     view(&state, &note, tags)
 }
 
-#[tauri::command]
+/// Creating a window needs the event loop, so this must not run on the main
+/// thread: `(async)` moves the handler to the thread pool, like every other
+/// command that creates or shows a window.
+#[tauri::command(async)]
 pub fn create_note(app: AppHandle, state: State<'_, AppState>) -> Result<NoteView, String> {
     create_note_impl(&app, &state)
 }
@@ -359,7 +362,7 @@ pub fn set_reminder(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_visible(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -519,17 +522,17 @@ pub fn remove_password(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_list(app: AppHandle) {
     windows::spawn_list(&app);
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn show_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     windows::show_all(&app, &state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hide_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     windows::hide_all(&app, &state)
 }

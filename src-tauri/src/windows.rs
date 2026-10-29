@@ -4,9 +4,17 @@
 //! window is labelled `list`. Both load the same frontend.
 //!
 //! Creating a WebView from inside an IPC handler deadlocks on Windows (the
-//! controller creation needs the event loop, which is blocked by the command),
-//! so every creation goes through `spawn_note` / `spawn_list`: they queue the
-//! work on the event loop and return at once.
+//! WebView2 controller creation waits on the very message loop that is busy
+//! running the handler), so every creation goes through `spawn_note` /
+//! `spawn_list`: they hop to a worker thread and only then queue the creation
+//! on the event loop.
+//!
+//! The worker hop is not decoration. `AppHandle::run_on_main_thread` calls
+//! `tauri_runtime_wry::Context::send_user_message`, which runs the closure
+//! inline when the caller already is the main thread; called from a regular
+//! command it would build the window inside the handler and deadlock again.
+//! From a worker thread the same call goes through the event loop proxy, so the
+//! creation becomes a normal queued event.
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -83,37 +91,57 @@ pub fn open_list(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Run window work on a worker thread, where `run_on_main_thread` really defers.
+fn worker<F: FnOnce() + Send + 'static>(name: &str, job: F) {
+    if let Err(error) = std::thread::Builder::new().name(name.to_string()).spawn(job) {
+        eprintln!("[notas] no se pudo lanzar el hilo de ventanas: {error}");
+    }
+}
+
 /// Open a note window on the event loop (safe from any thread and any handler).
 pub fn spawn_note(app: &AppHandle, note_id: &str) {
     let handle = app.clone();
     let id = note_id.to_string();
-    if let Err(error) = app.run_on_main_thread(move || {
-        let state = handle.state::<AppState>();
-        let note = match state.conn() {
-            Ok(conn) => db::get(&conn, &id).ok().flatten(),
-            Err(_) => None,
+    worker("notas-note-window", move || {
+        // Read the row off the main thread: the event loop only builds windows.
+        let note = {
+            let state = handle.state::<AppState>();
+            let found = match state.conn() {
+                Ok(conn) => db::get(&conn, &id).ok().flatten(),
+                Err(_) => None,
+            };
+            found
         };
         let Some(note) = note else {
             return;
         };
-        if let Err(error) = open_note(&handle, &note) {
-            eprintln!("[notas] no se pudo abrir la ventana de la nota {id}: {error}");
+        let app = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = open_note(&app, &note) {
+                eprintln!(
+                    "[notas] no se pudo abrir la ventana de la nota {}: {error}",
+                    note.id
+                );
+            }
+        }) {
+            eprintln!("[notas] no se pudo encolar la ventana de la nota {id}: {error}");
         }
-    }) {
-        eprintln!("[notas] no se pudo encolar la ventana de la nota {note_id}: {error}");
-    }
+    });
 }
 
 /// Open the manager window on the event loop.
 pub fn spawn_list(app: &AppHandle) {
     let handle = app.clone();
-    if let Err(error) = app.run_on_main_thread(move || {
-        if let Err(error) = open_list(&handle) {
-            eprintln!("[notas] no se pudo abrir la lista de notas: {error}");
+    worker("notas-list-window", move || {
+        let app = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = open_list(&app) {
+                eprintln!("[notas] no se pudo abrir la lista de notas: {error}");
+            }
+        }) {
+            eprintln!("[notas] no se pudo encolar la lista de notas: {error}");
         }
-    }) {
-        eprintln!("[notas] no se pudo encolar la lista de notas: {error}");
-    }
+    });
 }
 
 /// Show a note window, creating it later when it does not exist yet.
