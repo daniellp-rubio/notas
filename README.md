@@ -36,9 +36,17 @@ posición y estado fijado entre reinicios.
   memoria y se puede editar, y cada guardado se vuelve a cifrar. La clave derivada
   solo vive en la memoria del proceso Rust y se descarta al volver a bloquear o al
   salir. Quitar la contraseña exige escribirla de nuevo.
+- **Iniciar con Windows**: activo por defecto tras la primera ejecución. La
+  aplicación se abre sola al iniciar sesión, como un arranque normal (restaura sus
+  notas, deja el icono en la bandeja y pone en marcha los recordatorios). Se puede
+  desactivar o volver a activar en cualquier momento desde la bandeja del sistema,
+  en el ítem con marca de verificación **«Iniciar con Windows»**: lo que muestra la
+  marca es el estado real de Windows. Una vez desactivado, seguirá desactivado en
+  los siguientes arranques; la aplicación solo lo activa sola la primera vez.
 - **Bandeja del sistema**: «Nueva nota», «Mostrar todas», «Ocultar todas», «Lista de
-  notas» y «Salir». El clic izquierdo en el icono muestra todas las notas. Cerrar una
-  nota solo la oculta; la aplicación se cierra únicamente con «Salir».
+  notas», «Iniciar con Windows» y «Salir». El clic izquierdo en el icono muestra
+  todas las notas. Cerrar una nota solo la oculta; la aplicación se cierra
+  únicamente con «Salir».
 - **Instancia única**: si se abre el ejecutable otra vez, solo se muestran las notas.
 
 > ⚠️ **Si olvidas la contraseña de una nota, su contenido no se puede recuperar.**
@@ -47,19 +55,21 @@ posición y estado fijado entre reinicios.
 
 ## Requisitos
 
-- Windows 10 u 11 con WebView2 (incluido en Windows 11 y en la mayoría de Windows 10).
-- Para compilar: Rust estable con el toolchain MSVC, Visual Studio Build Tools 2022
-  (C++), Node.js 22 y npm.
+Para usar la aplicación basta con Windows 10 u 11. Para compilarla desde el código:
+
+- **Rust estable** instalado con [rustup](https://rustup.rs) y el toolchain
+  `stable-x86_64-pc-windows-msvc` (es el predeterminado en Windows).
+- **Microsoft C++ Build Tools**: instala *Visual Studio Build Tools* con la carga de
+  trabajo **«Desarrollo para el escritorio con C++»** (el enlazador MSVC).
+- **WebView2**: viene preinstalado en Windows 11 y en la mayoría de Windows 10. Si
+  falta, instala el *Evergreen Runtime* de Microsoft.
+- **Node.js 18 o superior** con npm.
 
 ## Compilar
 
-Desde la raíz del repositorio, con las rutas de Rust y Node de esta máquina:
+Desde la raíz del repositorio:
 
 ```bash
-export RUSTUP_HOME='D:\dev\rust\rustup' CARGO_HOME='D:\dev\rust\cargo'
-export PATH="D:\\dev\\rust\\cargo\\bin;C:\\Users\\dafel\\AppData\\Local\\nvm\\v22.22.0;$PATH"
-hash -r
-
 npm install
 npm run tauri build
 ```
@@ -67,12 +77,13 @@ npm run tauri build
 El resultado queda en:
 
 - `src-tauri/target/release/notas.exe` — ejecutable.
-- `src-tauri/target/release/bundle/nsis/Notas_1.0.0_x64-setup.exe` — instalador.
+- `src-tauri/target/release/bundle/nsis/Notas_1.0.0_x64-setup.exe` — instalador NSIS
+  para el usuario actual (no pide permisos de administrador).
 
-Comprobaciones:
+Comprobaciones del proyecto:
 
 ```bash
-cd src-tauri && cargo test && cargo clippy -- -D warnings && cd ..
+cd src-tauri && cargo test && cargo clippy --all-targets -- -D warnings && cd ..
 npx tsc --noEmit
 npm run build
 ```
@@ -92,6 +103,10 @@ guardan solo el texto cifrado; las columnas de texto en claro quedan vacías. La
 tiene `schema_version` (`PRAGMA user_version`) y se migra de forma idempotente al
 arrancar. Para empezar de cero basta con cerrar la aplicación y borrar ese archivo.
 
+«Iniciar con Windows» no se guarda en la base: es un valor llamado `Notas` bajo
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, que Windows consulta al iniciar
+sesión. Al desactivarlo desde la bandeja, ese valor se elimina.
+
 ## Estructura
 
 ```
@@ -106,9 +121,10 @@ src/
 src-tauri/
   src/db.rs           SQLite, migraciones y consultas
   src/crypto.rs       AES-256-GCM + Argon2id
-  src/state.rs        conexión y claves de sesión (se borran al bloquear o salir)
+  src/state.rs        conexión, claves de sesión e ítem de la bandeja
   src/windows.rs      creación, restauración y visibilidad de ventanas
   src/reminders.rs    hilo de recordatorios (cada 15 s)
+  src/autostart.rs    «Iniciar con Windows» (primera ejecución y estado real)
   src/tray.rs         icono y menú de la bandeja
   src/commands.rs     comandos expuestos al frontend
   src/lib.rs          arranque, bandeja, instancia única, cierre
