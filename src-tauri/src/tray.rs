@@ -2,7 +2,7 @@
 
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 use crate::{autostart, commands, windows};
@@ -14,6 +14,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let show_all = MenuItem::with_id(app, "show-all", "Mostrar todas", true, None::<&str>)?;
     let hide_all = MenuItem::with_id(app, "hide-all", "Ocultar todas", true, None::<&str>)?;
     let list = MenuItem::with_id(app, "list", "Lista de notas", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Ajustes…", true, None::<&str>)?;
     // The check mirrors the OS state; a failure to read it shows as unchecked
     // instead of aborting the tray.
     let autostart_checked = autostart::is_enabled(app).unwrap_or_else(|error| {
@@ -38,6 +39,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
             &show_all,
             &hide_all,
             &list,
+            &settings,
             &autostart_item,
             &separator,
             &quit,
@@ -74,10 +76,14 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "list" => windows::spawn_list(app),
+                "settings" => windows::spawn_settings(app),
                 "autostart" => {
                     let current = autostart::is_enabled(app).unwrap_or(false);
                     match autostart::set_enabled(app, !current) {
-                        Ok(actual) => state.sync_autostart_item(actual),
+                        Ok(actual) => {
+                            state.sync_autostart_item(actual);
+                            let _ = app.emit("autostart-changed", actual);
+                        }
                         Err(error) => {
                             eprintln!("[notas] no se pudo cambiar «Iniciar con Windows»: {error}")
                         }

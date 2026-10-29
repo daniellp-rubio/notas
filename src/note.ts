@@ -643,6 +643,13 @@ function toggleMenu(): void {
     });
     body.append(list);
 
+    const settings = el("button", { class: "menu-item", text: "Ajustes…", attrs: { type: "button" } });
+    settings.addEventListener("click", () => {
+      closePopover();
+      api.openSettings().catch(showError);
+    });
+    body.append(settings);
+
     const remove = el("button", {
       class: "menu-item danger",
       text: "Eliminar",

@@ -30,6 +30,32 @@ export interface NoteView {
   height: number;
 }
 
+export interface ShortcutInfo {
+  id: string;
+  label: string;
+  accelerator: string;
+  active: boolean;
+}
+
+export interface BackupEntry {
+  name: string;
+  size: number;
+  modified_at: number;
+}
+
+export interface SettingsState {
+  autostart: boolean;
+  last_backup_at: number | null;
+  backups: BackupEntry[];
+  shortcuts: ShortcutInfo[];
+}
+
+export interface ImportSummary {
+  imported: number;
+  updated: number;
+  unchanged: number;
+}
+
 export interface Geometry {
   x: number;
   y: number;
@@ -73,6 +99,16 @@ export const api = {
   removePassword: (id: string, password: string) =>
     invoke<void>("remove_password", { id, password }),
   openList: () => invoke<void>("open_list"),
+  openSettings: () => invoke<void>("open_settings"),
+  settingsState: () => invoke<SettingsState>("settings_state"),
+  autostartEnabled: () => invoke<boolean>("autostart_enabled"),
+  setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
+  backupNow: () => invoke<string>("backup_now"),
+  restoreBackup: (name: string) => invoke<void>("restore_backup", { name }),
+  openBackupsFolder: () => invoke<string>("open_backups_folder"),
+  exportMarkdown: (path: string | null = null) => invoke<string | null>("export_markdown", { path }),
+  exportJson: (path: string | null = null) => invoke<string | null>("export_json", { path }),
+  importJson: (path: string | null = null) => invoke<ImportSummary | null>("import_json", { path }),
   showAll: () => invoke<void>("show_all"),
   hideAll: () => invoke<void>("hide_all"),
   quit: () => invoke<void>("quit_app"),

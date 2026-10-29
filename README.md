@@ -14,9 +14,10 @@ posición y estado fijado entre reinicios.
   pastel con texto oscuro.
 - **Siempre encima**: cada nota se puede fijar por encima del resto de ventanas.
 - **Recordatorios**: fecha y hora local por nota. Un hilo en Rust revisa cada 15 s;
-  cuando vence, muestra una notificación de Windows, trae la nota al frente y la
-  marca como avisada. Los recordatorios que vencieron con la aplicación cerrada se
-  avisan una sola vez al arrancar.
+  cuando vence, muestra una notificación de Windows con el sonido normal, trae la
+  nota al frente (la marca como visible, así sigue ahí tras reiniciar) y la deja
+  como avisada. Los recordatorios que vencieron con la aplicación cerrada se avisan
+  una sola vez al arrancar.
 - **Listas de verificación**: cada nota es de texto o de lista. En modo lista cada
   elemento tiene casilla (tachado al marcarlo), `Enter` añade uno debajo, `Retroceso`
   en un elemento vacío lo borra y la `×` lo elimina. Al cambiar de modo, las líneas
@@ -43,9 +44,33 @@ posición y estado fijado entre reinicios.
   en el ítem con marca de verificación **«Iniciar con Windows»**: lo que muestra la
   marca es el estado real de Windows. Una vez desactivado, seguirá desactivado en
   los siguientes arranques; la aplicación solo lo activa sola la primera vez.
+- **Atajos de teclado globales**: `Ctrl+Alt+N` crea una nota (igual que «Nueva
+  nota» de la bandeja) y `Ctrl+Alt+M` alterna entre ocultar todas las notas y
+  mostrarlas todas. Funcionan con cualquier ventana activa. Si otro programa ya usa
+  una combinación, la aplicación sigue funcionando y los ajustes muestran ese atajo
+  como «No disponible (lo usa otro programa)».
+- **Copias de seguridad automáticas**: al arrancar, si la última copia tiene más de
+  24 h, y después cada 24 h mientras la aplicación está abierta, se guarda una copia
+  de `notas.db` con la API de copia en línea de SQLite (consistente aunque haya
+  escrituras en curso) en `backups\notas-AAAA-MM-DD.db`. Se conservan las 7 últimas.
+  Las notas bloqueadas solo aparecen cifradas, porque la copia es del propio archivo.
+- **Exportar e importar**: «Exportar a Markdown» escribe un `.md` con todas las
+  notas sin contraseña (título como encabezado, cuerpo, listas como `- [ ]` / `- [x]`
+  y una línea de etiquetas); las bloqueadas solo dejan el texto
+  «🔒 Nota bloqueada (no se exporta su contenido)». «Exportar copia completa (.json)»
+  guarda todo (notas, etiquetas, posición, tamaño, color, recordatorios) en un
+  archivo versionado; las bloqueadas van como cifrado, sal y nonce en base64.
+  «Importar copia (.json)» añade las notas que faltan y solo reemplaza una nota
+  existente cuando la copia es más nueva, con un resumen de cuántas se importaron,
+  actualizaron o quedaron igual. «Restaurar copia automática» hace antes una copia
+  de seguridad de las notas actuales y recarga las ventanas.
+- **Ajustes**: ventana propia (en la barra de tareas) con «Iniciar con Windows», el
+  estado de los atajos, las copias de seguridad (última fecha, hacer una copia
+  ahora, restaurar, abrir la carpeta, exportar e importar) y un apartado de
+  sincronización reservado para más adelante.
 - **Bandeja del sistema**: «Nueva nota», «Mostrar todas», «Ocultar todas», «Lista de
-  notas», «Iniciar con Windows» y «Salir». El clic izquierdo en el icono muestra
-  todas las notas. Cerrar una nota solo la oculta; la aplicación se cierra
+  notas», «Ajustes…», «Iniciar con Windows» y «Salir». El clic izquierdo en el icono
+  muestra todas las notas. Cerrar una nota solo la oculta; la aplicación se cierra
   únicamente con «Salir».
 - **Instancia única**: si se abre el ejecutable otra vez, solo se muestran las notas.
 
@@ -77,7 +102,7 @@ npm run tauri build
 El resultado queda en:
 
 - `src-tauri/target/release/notas.exe` — ejecutable.
-- `src-tauri/target/release/bundle/nsis/Notas_1.0.0_x64-setup.exe` — instalador NSIS
+- `src-tauri/target/release/bundle/nsis/Notas_1.1.0_x64-setup.exe` — instalador NSIS
   para el usuario actual (no pide permisos de administrador).
 
 Comprobaciones del proyecto:
@@ -103,6 +128,10 @@ guardan solo el texto cifrado; las columnas de texto en claro quedan vacías. La
 tiene `schema_version` (`PRAGMA user_version`) y se migra de forma idempotente al
 arrancar. Para empezar de cero basta con cerrar la aplicación y borrar ese archivo.
 
+Las copias automáticas viven en `%APPDATA%\com.dafel.notas\backups\`. Las que se
+hacen antes de restaurar llevan otro nombre (`notas-pre-restauracion-…`) y no entran
+en la rotación de 7.
+
 «Iniciar con Windows» no se guarda en la base: es un valor llamado `Notas` bajo
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, que Windows consulta al iniciar
 sesión. Al desactivarlo desde la bandeja, ese valor se elimina.
@@ -112,9 +141,10 @@ sesión. Al desactivarlo desde la bandeja, ese valor se elimina.
 ```
 index.html            punto de entrada de las dos ventanas
 src/
-  main.ts             decide si la ventana es una nota o la lista
+  main.ts             decide si la ventana es una nota, la lista o los ajustes
   note.ts             ventana de nota: cabecera, editor, lista, cerrojo
   list.ts             ventana «Lista de notas»
+  settings.ts         ventana «Ajustes»
   api.ts              tipos y llamadas tipadas a los comandos de Rust
   ui.ts               ayudas de DOM, iconos, diálogos y avisos
   styles.css          hoja de estilos
@@ -124,6 +154,8 @@ src-tauri/
   src/state.rs        conexión, claves de sesión e ítem de la bandeja
   src/windows.rs      creación, restauración y visibilidad de ventanas
   src/reminders.rs    hilo de recordatorios (cada 15 s)
+  src/backup.rs       copias automáticas, exportar e importar
+  src/shortcuts.rs    atajos de teclado globales
   src/autostart.rs    «Iniciar con Windows» (primera ejecución y estado real)
   src/tray.rs         icono y menú de la bandeja
   src/commands.rs     comandos expuestos al frontend

@@ -4,10 +4,12 @@
 //! through commands; the frontend is a thin view that never touches the disk.
 
 mod autostart;
+mod backup;
 mod commands;
 mod crypto;
 mod db;
 mod reminders;
+mod shortcuts;
 mod state;
 mod tray;
 mod windows;
@@ -63,7 +65,10 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let state = app.state::<AppState>();
         windows::restore(app.handle(), &state).map_err(Box::<dyn std::error::Error>::from)?;
     }
+    let status = shortcuts::register(app.handle());
+    app.state::<AppState>().set_shortcuts(status);
     reminders::start(app.handle().clone());
+    backup::start_scheduler(app.handle().clone());
     Ok(())
 }
 
@@ -76,6 +81,8 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(setup)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -120,6 +127,14 @@ pub fn run() {
             commands::hide_all,
             commands::autostart_enabled,
             commands::set_autostart,
+            commands::open_settings,
+            commands::settings_state,
+            commands::backup_now,
+            commands::restore_backup,
+            commands::open_backups_folder,
+            commands::export_markdown,
+            commands::export_json,
+            commands::import_json,
             commands::quit_app,
         ]);
 

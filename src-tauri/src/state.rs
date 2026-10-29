@@ -13,6 +13,7 @@ use tauri::menu::CheckMenuItem;
 use tauri::Wry;
 
 use crate::crypto::KEY_LEN;
+use crate::shortcuts::ShortcutInfo;
 
 /// A derived key that wipes itself when dropped.
 pub struct SessionKey([u8; KEY_LEN]);
@@ -39,6 +40,8 @@ pub struct AppState {
     exiting: AtomicBool,
     /// Tray check item for "Iniciar con Windows", kept so commands can sync it.
     autostart_item: Mutex<Option<CheckMenuItem<Wry>>>,
+    /// Global shortcuts and whether the OS accepted each one.
+    shortcuts: Mutex<Vec<ShortcutInfo>>,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
             keys: Mutex::new(HashMap::new()),
             exiting: AtomicBool::new(false),
             autostart_item: Mutex::new(None),
+            shortcuts: Mutex::new(Vec::new()),
         }
     }
 
@@ -66,6 +70,20 @@ impl AppState {
                 }
             }
         }
+    }
+
+    pub fn set_shortcuts(&self, status: Vec<ShortcutInfo>) {
+        if let Ok(mut slot) = self.shortcuts.lock() {
+            *slot = status;
+        }
+    }
+
+    /// Status of the global shortcuts, as reported when they were registered.
+    pub fn shortcuts(&self) -> Vec<ShortcutInfo> {
+        self.shortcuts
+            .lock()
+            .map(|slot| slot.clone())
+            .unwrap_or_default()
     }
 
     pub fn conn(&self) -> Result<MutexGuard<'_, Connection>, String> {

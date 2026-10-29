@@ -3,12 +3,17 @@
 //! Every command returns `Result<_, String>` so the UI can show a message
 //! instead of the process dying on a bad path or a corrupted row.
 
+use std::path::PathBuf;
+
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::autostart;
+use crate::backup;
 use crate::crypto::{self, NONCE_LEN, SALT_LEN};
 use crate::db::{self, Content, Item, Note, COLORS, MODE_LIST, MODE_TEXT};
+use crate::shortcuts::ShortcutInfo;
 use crate::state::AppState;
 use crate::windows;
 
@@ -558,5 +563,227 @@ pub fn set_autostart(
 ) -> Result<bool, String> {
     let actual = autostart::set_enabled(&app, enabled)?;
     state.sync_autostart_item(actual);
+    let _ = app.emit("autostart-changed", actual);
     Ok(actual)
+}
+
+// -------------------------------------------------------------------- ajustes
+
+/// Everything the settings window needs on open.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SettingsState {
+    pub autostart: bool,
+    pub last_backup_at: Option<i64>,
+    pub backups: Vec<backup::BackupEntry>,
+    pub shortcuts: Vec<ShortcutInfo>,
+}
+
+fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path().app_data_dir().map_err(err)
+}
+
+/// Run a job that may block (native dialogs, file copies) on a thread of its
+/// own, so the event loop never waits for the user to pick a file.
+fn blocking<T: Send + 'static>(
+    job: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("notas-file-job".to_string())
+        .spawn(move || {
+            let _ = sender.send(job());
+        })
+        .map_err(err)?;
+    match receiver.recv() {
+        Ok(result) => result,
+        Err(_) => Err(bad("La operación se interrumpió")),
+    }
+}
+
+fn save_dialog(
+    app: &AppHandle,
+    title: &str,
+    file_name: &str,
+    filter: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    app.dialog()
+        .file()
+        .set_title(title)
+        .set_file_name(file_name)
+        .add_filter(filter, &[extension])
+        .blocking_save_file()
+        .and_then(|path| path.into_path().ok())
+}
+
+fn open_dialog(
+    app: &AppHandle,
+    title: &str,
+    filter: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    app.dialog()
+        .file()
+        .set_title(title)
+        .add_filter(filter, &[extension])
+        .blocking_pick_file()
+        .and_then(|path| path.into_path().ok())
+}
+
+/// Open the settings window (never on the main thread: see `windows`).
+#[tauri::command(async)]
+pub fn open_settings(app: AppHandle) {
+    windows::spawn_settings(&app);
+}
+
+#[tauri::command]
+pub fn settings_state(app: AppHandle, state: State<'_, AppState>) -> Result<SettingsState, String> {
+    let folder = data_dir(&app)?;
+    let autostart = autostart::is_enabled(&app).unwrap_or(false);
+    let (last_backup_at, backups) = {
+        let conn = state.conn()?;
+        (backup::last_at(&conn, &folder), backup::list(&folder))
+    };
+    Ok(SettingsState {
+        autostart,
+        last_backup_at,
+        backups,
+        shortcuts: state.shortcuts(),
+    })
+}
+
+/// Write today's automatic backup now and return its path.
+#[tauri::command(async)]
+pub fn backup_now(app: AppHandle) -> Result<String, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let folder = data_dir(&handle)?;
+        let state = handle.state::<AppState>();
+        let conn = state.conn()?;
+        let path = backup::create(&conn, &folder)?;
+        Ok(path.display().to_string())
+    })
+}
+
+/// Replace every note with the contents of one automatic backup.
+#[tauri::command(async)]
+pub fn restore_backup(app: AppHandle, name: String) -> Result<(), String> {
+    let handle = app.clone();
+    blocking(move || {
+        let folder = data_dir(&handle)?;
+        if !backup::exists(&folder, &name) {
+            return Err(bad("Esa copia ya no existe"));
+        }
+        let state = handle.state::<AppState>();
+        let path = backup::dir(&folder).join(&name);
+        {
+            let mut conn = state.conn()?;
+            // A copy of what is about to be replaced, before touching anything.
+            backup::safety_copy(&conn, &folder)?;
+            backup::restore(&mut conn, &path)?;
+        }
+        state.forget_key(None);
+        windows::reload_all(&handle, &state)?;
+        Ok(())
+    })
+}
+
+#[tauri::command(async)]
+pub fn open_backups_folder(app: AppHandle) -> Result<String, String> {
+    let folder = backup::dir(&data_dir(&app)?);
+    std::fs::create_dir_all(&folder).map_err(err)?;
+    std::process::Command::new("explorer")
+        .arg(&folder)
+        .spawn()
+        .map_err(|error| format!("No se pudo abrir la carpeta: {error}"))?;
+    Ok(folder.display().to_string())
+}
+
+/// Destination chosen by the caller, or the native save dialog when there is
+/// none. The dialog path is what the settings window uses; an explicit path
+/// keeps the command usable without a window in front.
+fn target_path(
+    app: &AppHandle,
+    chosen: Option<String>,
+    title: &str,
+    file_name: &str,
+    filter: &str,
+    extension: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = chosen {
+        return Some(PathBuf::from(path));
+    }
+    save_dialog(app, title, file_name, filter, extension)
+}
+
+/// One Markdown file with every note; locked ones only as a placeholder.
+#[tauri::command(async)]
+pub fn export_markdown(app: AppHandle, path: Option<String>) -> Result<Option<String>, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let Some(path) = target_path(
+            &handle,
+            path,
+            "Exportar a Markdown",
+            &backup::suggested_markdown_name(),
+            "Markdown",
+            "md",
+        ) else {
+            return Ok(None);
+        };
+        let state = handle.state::<AppState>();
+        let conn = state.conn()?;
+        backup::export_markdown(&conn, &path)?;
+        Ok(Some(path.display().to_string()))
+    })
+}
+
+/// The versioned JSON copy, with the encrypted payload of locked notes.
+#[tauri::command(async)]
+pub fn export_json(app: AppHandle, path: Option<String>) -> Result<Option<String>, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let Some(path) = target_path(
+            &handle,
+            path,
+            "Exportar copia completa",
+            &backup::suggested_json_name(),
+            "Copia de Notas",
+            "json",
+        ) else {
+            return Ok(None);
+        };
+        let state = handle.state::<AppState>();
+        let conn = state.conn()?;
+        backup::export_json(&conn, &path)?;
+        Ok(Some(path.display().to_string()))
+    })
+}
+
+/// Merge a JSON copy into the current notes.
+#[tauri::command(async)]
+pub fn import_json(
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<Option<backup::ImportSummary>, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let picked = match path {
+            Some(path) => Some(PathBuf::from(path)),
+            None => open_dialog(&handle, "Importar copia", "Copia de Notas", "json"),
+        };
+        let Some(path) = picked else {
+            return Ok(None);
+        };
+        let state = handle.state::<AppState>();
+        let summary = {
+            let conn = state.conn()?;
+            backup::import_json(&conn, &path)?
+        };
+        // Replaced rows may keep an id whose key belonged to the old payload.
+        state.forget_key(None);
+        // The rows changed under the open windows: rebuild them from the database.
+        windows::reload_all(&handle, &state)?;
+        Ok(Some(summary))
+    })
 }

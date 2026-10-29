@@ -22,6 +22,7 @@ use crate::db::{self, Note};
 use crate::state::AppState;
 
 pub const LIST_LABEL: &str = "list";
+pub const SETTINGS_LABEL: &str = "settings";
 pub const MIN_WIDTH: f64 = 200.0;
 pub const MIN_HEIGHT: f64 = 160.0;
 
@@ -91,6 +92,28 @@ pub fn open_list(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Create the settings window (raises it when it already exists). It is a
+/// normal window, with a frame and a taskbar button, unlike the notes.
+pub fn open_settings(app: &AppHandle) -> tauri::Result<()> {
+    if let Some(window) = app.get_webview_window(SETTINGS_LABEL) {
+        window.unminimize()?;
+        window.show()?;
+        window.set_focus()?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        app,
+        SETTINGS_LABEL,
+        WebviewUrl::App("index.html?view=settings".into()),
+    )
+    .title("Ajustes")
+    .inner_size(620.0, 720.0)
+    .min_inner_size(480.0, 520.0)
+    .center()
+    .build()?;
+    Ok(())
+}
+
 /// Run window work on a worker thread, where `run_on_main_thread` really defers.
 fn worker<F: FnOnce() + Send + 'static>(name: &str, job: F) {
     if let Err(error) = std::thread::Builder::new().name(name.to_string()).spawn(job) {
@@ -144,6 +167,21 @@ pub fn spawn_list(app: &AppHandle) {
     });
 }
 
+/// Open the settings window on the event loop.
+pub fn spawn_settings(app: &AppHandle) {
+    let handle = app.clone();
+    worker("notas-settings-window", move || {
+        let app = handle.clone();
+        if let Err(error) = handle.run_on_main_thread(move || {
+            if let Err(error) = open_settings(&app) {
+                eprintln!("[notas] no se pudo abrir los ajustes: {error}");
+            }
+        }) {
+            eprintln!("[notas] no se pudo encolar la ventana de ajustes: {error}");
+        }
+    });
+}
+
 /// Show a note window, creating it later when it does not exist yet.
 pub fn show_note(app: &AppHandle, id: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(&note_label(id)) {
@@ -188,6 +226,32 @@ pub fn hide_all(app: &AppHandle, state: &AppState) -> Result<(), String> {
         if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
             let _ = window.hide();
         }
+    }
+    let _ = app.emit("notes-changed", "");
+    Ok(())
+}
+
+/// Rebuild every note window from what the database says right now.
+///
+/// Used after restoring a backup: the rows the windows were built from are
+/// gone, so the old windows are destroyed and the visible notes opened again
+/// through `spawn_note`, which is the only safe way to create a webview from
+/// outside the setup phase.
+pub fn reload_all(app: &AppHandle, state: &AppState) -> Result<(), String> {
+    let labels: Vec<String> = app.webview_windows().into_keys().collect();
+    for label in labels {
+        if note_id_from_label(&label).is_some() {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.destroy();
+            }
+        }
+    }
+    let notes = {
+        let conn = state.conn()?;
+        db::list(&conn).map_err(|error| error.to_string())?
+    };
+    for note in notes.iter().filter(|note| note.visible) {
+        spawn_note(app, &note.id);
     }
     let _ = app.emit("notes-changed", "");
     Ok(())
