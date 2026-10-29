@@ -18,6 +18,7 @@ export async function mountSettings(): Promise<void> {
   byId("app").replaceChildren(
     el("div", { class: "settings-shell", attrs: { id: "settings-shell" } }),
   );
+  await load();
 }
 
 /** Build the whole window from the current state. */
@@ -252,5 +253,3 @@ async function importAction(): Promise<void> {
 void listen<boolean>("autostart-changed", (event) => {
   if (autostartBox) autostartBox.checked = event.payload;
 });
-
-void load();
