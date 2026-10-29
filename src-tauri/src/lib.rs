@@ -1,0 +1,127 @@
+//! Notas: sticky notes for the Windows desktop.
+//!
+//! The library owns every piece of state (SQLite + derived keys) and exposes it
+//! through commands; the frontend is a thin view that never touches the disk.
+
+mod commands;
+mod crypto;
+mod db;
+mod reminders;
+mod state;
+mod tray;
+mod windows;
+
+use tauri::{Emitter, Manager};
+
+use state::AppState;
+
+/// First run: leave one note on screen instead of an empty desktop.
+fn seed_first_run(conn: &rusqlite::Connection) -> Result<(), db::DbError> {
+    if db::meta_get(conn, "seeded")?.is_some() {
+        return Ok(());
+    }
+    db::meta_set(conn, "seeded", "1")?;
+    if db::count(conn)? == 0 {
+        let mut note = db::Note::fresh(uuid::Uuid::new_v4().to_string(), 260.0, 190.0);
+        note.width = 320.0;
+        note.height = 280.0;
+        let content = db::Content {
+            text: "Bienvenido a Notas\n\nArrastra la nota desde la barra de arriba.\nFija, colorea, etiqueta y pon recordatorios.\n\nLa primera línea es el título en la lista de notas."
+                .to_string(),
+            items: Vec::new(),
+        };
+        db::insert_note(conn, &note)?;
+        db::save_plain_content(conn, &note.id, db::MODE_TEXT, &content)?;
+    }
+    Ok(())
+}
+
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let data_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    let conn = db::open(&data_dir.join("notas.db"))?;
+    seed_first_run(&conn)?;
+    app.manage(AppState::new(conn));
+
+    tray::create(app.handle())?;
+    {
+        let state = app.state::<AppState>();
+        windows::restore(app.handle(), &state).map_err(Box::<dyn std::error::Error>::from)?;
+    }
+    reminders::start(app.handle().clone());
+    Ok(())
+}
+
+pub fn run() {
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            let state = app.state::<AppState>();
+            if let Err(error) = windows::show_all(app, &state) {
+                eprintln!("[notas] no se pudieron mostrar las notas: {error}");
+            }
+        }))
+        .plugin(tauri_plugin_notification::init())
+        .setup(setup)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let Some(id) = windows::note_id_from_label(window.label()).map(str::to_string)
+                else {
+                    return;
+                };
+                let state = window.state::<AppState>();
+                if state.is_exiting() {
+                    return;
+                }
+                // Closing a note only hides it: the app keeps living in the tray.
+                api.prevent_close();
+                let _ = window.hide();
+                if let Ok(conn) = state.conn() {
+                    let _ = db::set_visible(&conn, &id, false);
+                }
+                let _ = window.app_handle().emit("notes-changed", id);
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::list_notes,
+            commands::get_note,
+            commands::create_note,
+            commands::save_text,
+            commands::save_items,
+            commands::set_mode,
+            commands::set_color,
+            commands::set_pin,
+            commands::save_geometry,
+            commands::set_reminder,
+            commands::set_visible,
+            commands::delete_note,
+            commands::add_tag,
+            commands::remove_tag,
+            commands::lock_note,
+            commands::unlock_note,
+            commands::relock_note,
+            commands::remove_password,
+            commands::open_list,
+            commands::show_all,
+            commands::hide_all,
+            commands::quit_app,
+        ]);
+
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("[notas] no se pudo iniciar la aplicación: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // `code == None` means "the last window closed"; keep running in the tray.
+            if code.is_none() {
+                api.prevent_exit();
+            } else {
+                app_handle.state::<AppState>().forget_key(None);
+            }
+        }
+    });
+}
