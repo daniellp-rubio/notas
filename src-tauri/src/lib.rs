@@ -3,6 +3,7 @@
 //! The library owns every piece of state (SQLite + derived keys) and exposes it
 //! through commands; the frontend is a thin view that never touches the disk.
 
+mod autostart;
 mod commands;
 mod crypto;
 mod db;
@@ -14,6 +15,11 @@ mod windows;
 use tauri::{Emitter, Manager};
 
 use state::AppState;
+
+/// Name of the app in Windows: the `Run` value written for autostart and what
+/// Task Manager shows at startup. Fixed so the registry entry never changes
+/// with the package name.
+pub const APP_NAME: &str = "Notas";
 
 /// First run: leave one note on screen instead of an empty desktop.
 fn seed_first_run(conn: &rusqlite::Connection) -> Result<(), db::DbError> {
@@ -37,10 +43,19 @@ fn seed_first_run(conn: &rusqlite::Connection) -> Result<(), db::DbError> {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // Registered here (not on the builder) so the plugin state exists before
+    // the first-run default reads it.
+    app.handle().plugin(
+        tauri_plugin_autostart::Builder::new()
+            .app_name(APP_NAME)
+            .build(),
+    )?;
+
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let conn = db::open(&data_dir.join("notas.db"))?;
     seed_first_run(&conn)?;
+    autostart::ensure_initial_default(app.handle(), &conn);
     app.manage(AppState::new(conn));
 
     tray::create(app.handle())?;
@@ -103,6 +118,8 @@ pub fn run() {
             commands::open_list,
             commands::show_all,
             commands::hide_all,
+            commands::autostart_enabled,
+            commands::set_autostart,
             commands::quit_app,
         ]);
 

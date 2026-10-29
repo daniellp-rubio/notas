@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::Connection;
+use tauri::menu::CheckMenuItem;
+use tauri::Wry;
 
 use crate::crypto::KEY_LEN;
 
@@ -35,6 +37,8 @@ pub struct AppState {
     db: Mutex<Connection>,
     keys: Mutex<HashMap<String, SessionKey>>,
     exiting: AtomicBool,
+    /// Tray check item for "Iniciar con Windows", kept so commands can sync it.
+    autostart_item: Mutex<Option<CheckMenuItem<Wry>>>,
 }
 
 impl AppState {
@@ -43,6 +47,24 @@ impl AppState {
             db: Mutex::new(conn),
             keys: Mutex::new(HashMap::new()),
             exiting: AtomicBool::new(false),
+            autostart_item: Mutex::new(None),
+        }
+    }
+
+    pub fn set_autostart_item(&self, item: CheckMenuItem<Wry>) {
+        if let Ok(mut slot) = self.autostart_item.lock() {
+            *slot = Some(item);
+        }
+    }
+
+    /// Make the tray check match the real OS state.
+    pub fn sync_autostart_item(&self, checked: bool) {
+        if let Ok(slot) = self.autostart_item.lock() {
+            if let Some(item) = slot.as_ref() {
+                if let Err(error) = item.set_checked(checked) {
+                    eprintln!("[notas] no se pudo actualizar «Iniciar con Windows»: {error}");
+                }
+            }
         }
     }
 

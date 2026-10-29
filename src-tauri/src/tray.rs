@@ -1,11 +1,11 @@
 //! System tray icon: the app lives here when every note is hidden.
 
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 use crate::state::AppState;
-use crate::{commands, windows};
+use crate::{autostart, commands, windows};
 
 pub const TRAY_ID: &str = "notas-tray";
 
@@ -14,11 +14,34 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let show_all = MenuItem::with_id(app, "show-all", "Mostrar todas", true, None::<&str>)?;
     let hide_all = MenuItem::with_id(app, "hide-all", "Ocultar todas", true, None::<&str>)?;
     let list = MenuItem::with_id(app, "list", "Lista de notas", true, None::<&str>)?;
+    // The check mirrors the OS state; a failure to read it shows as unchecked
+    // instead of aborting the tray.
+    let autostart_checked = autostart::is_enabled(app).unwrap_or_else(|error| {
+        eprintln!("[notas] no se pudo leer el inicio con Windows: {error}");
+        false
+    });
+    let autostart_item = CheckMenuItem::with_id(
+        app,
+        "autostart",
+        "Iniciar con Windows",
+        true,
+        autostart_checked,
+        None::<&str>,
+    )?;
+    app.state::<AppState>().set_autostart_item(autostart_item.clone());
     let quit = MenuItem::with_id(app, "quit", "Salir", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(
         app,
-        &[&new_note, &show_all, &hide_all, &list, &separator, &quit],
+        &[
+            &new_note,
+            &show_all,
+            &hide_all,
+            &list,
+            &autostart_item,
+            &separator,
+            &quit,
+        ],
     )?;
 
     let icon = app
@@ -51,6 +74,15 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 "list" => windows::spawn_list(app),
+                "autostart" => {
+                    let current = autostart::is_enabled(app).unwrap_or(false);
+                    match autostart::set_enabled(app, !current) {
+                        Ok(actual) => state.sync_autostart_item(actual),
+                        Err(error) => {
+                            eprintln!("[notas] no se pudo cambiar «Iniciar con Windows»: {error}")
+                        }
+                    }
+                }
                 "quit" => commands::quit_impl(app, &state),
                 _ => {}
             }

@@ -6,6 +6,7 @@
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::autostart;
 use crate::crypto::{self, NONCE_LEN, SALT_LEN};
 use crate::db::{self, Content, Item, Note, COLORS, MODE_LIST, MODE_TEXT};
 use crate::state::AppState;
@@ -540,4 +541,22 @@ pub fn hide_all(app: AppHandle, state: State<'_, AppState>) -> Result<(), String
 #[tauri::command]
 pub fn quit_app(app: AppHandle, state: State<'_, AppState>) {
     quit_impl(&app, &state);
+}
+
+/// Real OS state of "Iniciar con Windows".
+#[tauri::command(async)]
+pub fn autostart_enabled(app: AppHandle) -> Result<bool, String> {
+    autostart::is_enabled(&app)
+}
+
+/// Enable or disable "Iniciar con Windows" and return the state Windows reports.
+#[tauri::command(async)]
+pub fn set_autostart(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    let actual = autostart::set_enabled(&app, enabled)?;
+    state.sync_autostart_item(actual);
+    Ok(actual)
 }
