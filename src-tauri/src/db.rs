@@ -5,7 +5,7 @@
 //! payload (`body_cipher` + `salt` + `nonce`). A locked note never has
 //! plaintext columns set.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the schema changes and add a migration step below.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -41,17 +41,20 @@ pub struct Item {
     pub done: bool,
 }
 
-/// Plaintext content of a note, in whichever mode it is in.
+/// Content of a note. Text notes keep sanitized HTML; checklist items stay plain text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Content {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub items: Vec<Item>,
+    /// Missing from v1 encrypted payloads, which held plain text.
+    #[serde(default)]
+    pub rich_text: bool,
 }
 
 impl Content {
-    /// Text kept in `body_plain`: the body in text mode, the item lines in list mode.
+    /// Plain-text projection used for titles, search, mode conversion and Markdown.
     pub fn plain(&self, mode: &str) -> String {
         if mode == MODE_LIST {
             self.items
@@ -60,17 +63,16 @@ impl Content {
                 .collect::<Vec<_>>()
                 .join("\n")
         } else {
-            self.text.clone()
+            html_to_text(&self.text)
         }
     }
 
-    /// Turn the body into a checklist: every non-empty line becomes an item.
+    /// Turn the body into a checklist: every non-empty text line becomes an item.
     pub fn convert_to_list(&mut self) {
         if !self.items.is_empty() {
             return;
         }
-        self.items = self
-            .text
+        self.items = html_to_text(&self.text)
             .lines()
             .map(|line| line.trim_end())
             .filter(|line| !line.trim().is_empty())
@@ -81,10 +83,152 @@ impl Content {
             .collect();
     }
 
-    /// Turn the checklist back into plain lines (checkbox state is dropped).
+    /// Turn the checklist back into rich-text lines (checkbox state is dropped).
     pub fn convert_to_text(&mut self) {
-        self.text = self.plain(MODE_LIST);
+        self.text = plain_to_html(&self.plain(MODE_LIST));
         self.items.clear();
+        self.rich_text = true;
+    }
+}
+
+/// The only inline styles a note may retain. They are dark enough for every paper colour.
+pub const FONT_SIZES: [&str; 3] = ["12px", "14px", "18px"];
+pub const TEXT_COLORS: [&str; 5] = ["#1f1d1a", "#8b0000", "#003c8f", "#155724", "#5b5b5b"];
+
+/// Escape legacy plain text and preserve every original line as a block.
+pub fn plain_to_html(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let escaped = line
+                .trim_end_matches('\r')
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!("<div>{escaped}</div>")
+        })
+        .collect()
+}
+
+/// Decode the entity forms emitted by the HTML serializer.
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "#39" | "#x27" | "#X27" => Some('\''),
+        _ => entity
+            .strip_prefix("#x")
+            .or_else(|| entity.strip_prefix("#X"))
+            .and_then(|value| u32::from_str_radix(value, 16).ok())
+            .or_else(|| entity.strip_prefix('#').and_then(|value| value.parse().ok()))
+            .and_then(char::from_u32),
+    }
+}
+
+/// Project sanitized HTML into readable text without relying on the frontend.
+pub fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let bytes = html.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'<' {
+            let Some(end) = html[index..].find('>') else {
+                break;
+            };
+            let tag = html[index + 1..index + end].trim_start().to_ascii_lowercase();
+            let name = tag
+                .trim_start_matches('/')
+                .split(|character: char| character.is_whitespace() || character == '/')
+                .next()
+                .unwrap_or_default();
+            if matches!(name, "br" | "div" | "p" | "li") && !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            index += end + 1;
+        } else if bytes[index] == b'&' {
+            if let Some(end) = html[index..].find(';') {
+                let entity = &html[index + 1..index + end];
+                if let Some(character) = decode_entity(entity) {
+                    out.push(character);
+                    index += end + 1;
+                    continue;
+                }
+            }
+            out.push('&');
+            index += 1;
+        } else {
+            let Some(character) = html[index..].chars().next() else {
+                break;
+            };
+            out.push(character);
+            index += character.len_utf8();
+        }
+    }
+    out.trim_matches('\n').to_string()
+}
+
+fn allowed_style(style: &str) -> String {
+    let mut kept = Vec::with_capacity(2);
+    for declaration in style.split(';') {
+        let Some((property, value)) = declaration.split_once(':') else {
+            continue;
+        };
+        let property = property.trim().to_ascii_lowercase();
+        let value = value.trim().to_ascii_lowercase();
+        let allowed = match property.as_str() {
+            "font-size" => FONT_SIZES.contains(&value.as_str()),
+            "color" => TEXT_COLORS.contains(&value.as_str()),
+            _ => false,
+        };
+        if allowed && !kept.iter().any(|existing: &(String, String)| existing.0 == property) {
+            kept.push((property, value));
+        }
+    }
+    kept.into_iter()
+        .map(|(property, value)| format!("{property}:{value}"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+/// Sanitize a rich-text fragment. Structural parsing and CSS property filtering
+/// are done by Ammonia; exact values are constrained afterwards.
+pub fn sanitize_html(input: &str) -> String {
+    let tags = HashSet::from([
+        "p", "br", "div", "b", "strong", "i", "em", "u", "s", "strike", "ul", "ol", "li", "span",
+    ]);
+    let attributes = HashMap::from([("span", HashSet::from(["style"]))]);
+    let mut cleaner = ammonia::Builder::default();
+    cleaner
+        .tags(tags)
+        .tag_attributes(attributes)
+        .filter_style_properties(HashSet::from(["font-size", "color"]));
+    let html = cleaner.clean(input).to_string();
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(start) = rest.find("style=\"") {
+        let value_start = start + "style=\"".len();
+        let Some(end) = rest[value_start..].find('"') else {
+            return html;
+        };
+        out.push_str(&rest[..start]);
+        let style = allowed_style(&rest[value_start..value_start + end]);
+        if !style.is_empty() {
+            out.push_str("style=\"");
+            out.push_str(&style);
+            out.push('"');
+        }
+        rest = &rest[value_start + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Normalize user-provided text before any plaintext or encrypted save.
+pub fn normalize_content(content: &mut Content, mode: &str) {
+    if mode == MODE_TEXT {
+        content.text = sanitize_html(&content.text);
+        content.rich_text = true;
     }
 }
 
@@ -124,7 +268,11 @@ impl Note {
             color: "amarillo".to_string(),
             mode: MODE_TEXT.to_string(),
             body_plain: String::new(),
-            content_json: serde_json::to_string(&Content::default()).unwrap_or_else(|_| "{}".into()),
+            content_json: serde_json::to_string(&Content {
+                rich_text: true,
+                ..Content::default()
+            })
+            .unwrap_or_else(|_| "{}".into()),
             body_cipher: None,
             salt: None,
             nonce: None,
@@ -144,8 +292,14 @@ impl Note {
 
     /// Plaintext content when the note is not encrypted.
     pub fn content(&self) -> Content {
+        let has_rich_text = serde_json::from_str::<serde_json::Value>(&self.content_json)
+            .ok()
+            .and_then(|value| value.get("text").cloned())
+            .is_some();
         let mut content: Content = serde_json::from_str(&self.content_json).unwrap_or_default();
-        content.text = self.body_plain.clone();
+        if !has_rich_text {
+            content.text = self.body_plain.clone();
+        }
         content
     }
 
@@ -160,8 +314,7 @@ impl Note {
                 .map(|item| item.text.clone())
                 .unwrap_or_default()
         } else {
-            content
-                .text
+            html_to_text(&content.text)
                 .lines()
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("")
@@ -225,12 +378,48 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version < 1 {
         conn.execute_batch(SCHEMA_V1)?;
     }
-    // Future steps: if version < 2 { ... }
+    if version < 2 {
+        migrate_plain_text_to_html(conn)?;
+    }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     // `CREATE TABLE IF NOT EXISTS` also repairs rows added by hand.
     conn.execute_batch(SCHEMA_V1)?;
+    Ok(())
+}
+
+/// Convert v1 plaintext text notes once. Locked payloads carry their own
+/// `rich_text` marker and are converted the first time they are unlocked.
+fn migrate_plain_text_to_html(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT id, mode, body_plain, content_json FROM notes WHERE locked = 0 AND mode = ?1",
+    )?;
+    let rows = statement.query_map(params![MODE_TEXT], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut updates = Vec::new();
+    for row in rows {
+        let (id, mode, plain, content_json) = row?;
+        let mut content: Content = serde_json::from_str(&content_json).unwrap_or_default();
+        content.text = plain_to_html(&plain);
+        content.rich_text = true;
+        updates.push((id, mode, content, plain));
+    }
+    drop(statement);
+    for (id, mode, content, plain) in updates {
+        let payload = serde_json::to_string(&content)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        conn.execute(
+            "UPDATE notes SET mode = ?2, body_plain = ?3, content_json = ?4 WHERE id = ?1",
+            params![id, mode, plain, payload],
+        )?;
+    }
     Ok(())
 }
 
@@ -314,13 +503,20 @@ pub fn count(conn: &Connection) -> Result<i64> {
     Ok(total)
 }
 
-/// Write plaintext content: `body_plain` mirrors the readable text, the items
-/// live in `content_json`.
+/// Normalize one plaintext payload and derive its searchable projection.
+fn plaintext_parts(content: &Content, mode: &str) -> Result<(String, String)> {
+    let mut normalized = content.clone();
+    normalize_content(&mut normalized, mode);
+    let plain = normalized.plain(mode);
+    let payload = serde_json::to_string(&normalized)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    Ok((plain, payload))
+}
+
+/// Write plaintext content: `body_plain` mirrors the readable text, while
+/// `content_json` holds the sanitized HTML and checklist rows.
 pub fn save_plain_content(conn: &Connection, id: &str, mode: &str, content: &Content) -> Result<()> {
-    let plain = content.plain(mode);
-    let items_json = serde_json::to_string(&content.items)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let payload = format!(r#"{{"items":{items_json}}}"#);
+    let (plain, payload) = plaintext_parts(content, mode)?;
     conn.execute(
         "UPDATE notes SET mode = ?2, body_plain = ?3, content_json = ?4, updated_at = ?5 WHERE id = ?1",
         params![id, mode, plain, payload, now_ms()],
@@ -347,10 +543,7 @@ pub fn save_cipher(
 
 /// Remove the password from a note: store the recovered plaintext and drop the cipher.
 pub fn clear_lock(conn: &Connection, id: &str, mode: &str, content: &Content) -> Result<()> {
-    let plain = content.plain(mode);
-    let items_json = serde_json::to_string(&content.items)
-        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-    let payload = format!(r#"{{"items":{items_json}}}"#);
+    let (plain, payload) = plaintext_parts(content, mode)?;
     conn.execute(
         "UPDATE notes SET locked = 0, body_cipher = NULL, salt = NULL, nonce = NULL,
                 body_plain = ?2, content_json = ?3, updated_at = ?4
@@ -550,6 +743,7 @@ mod tests {
             let content = Content {
                 text: "Primera línea\nSegunda línea".to_string(),
                 items: Vec::new(),
+                rich_text: true,
             };
             save_plain_content(&conn, "nota-1", MODE_TEXT, &content).expect("content");
             set_color(&conn, "nota-1", "verde").expect("color");
@@ -587,13 +781,15 @@ mod tests {
     fn locked_row_keeps_no_plaintext() {
         let db = temp_db();
         let conn = open(&db.path).expect("open");
-        const SECRET: &str = "MARCADOR_SECRETO_123";
+        const SECRET: &str = "SECRETO_V2B";
         let mut note = sample("nota-3");
         note.body_plain = SECRET.to_string();
         insert_note(&conn, &note).expect("insert");
+        let html = format!("<div><b>{SECRET}</b></div>");
         let content = Content {
-            text: SECRET.to_string(),
+            text: html.clone(),
             items: Vec::new(),
+            rich_text: true,
         };
         save_plain_content(&conn, "nota-3", MODE_TEXT, &content).expect("content");
         assert!(require(&conn, "nota-3").expect("load").body_plain.contains(SECRET));
@@ -632,7 +828,7 @@ mod tests {
         )
         .expect("open");
         let recovered: Content = serde_json::from_slice(&plain).expect("json");
-        assert_eq!(recovered.text, SECRET);
+        assert_eq!(recovered.text, html);
         let _ = key;
     }
 
@@ -681,8 +877,9 @@ mod tests {
     #[test]
     fn mode_conversion_roundtrip() {
         let mut content = Content {
-            text: "uno\n\n dos \ntres".to_string(),
+            text: plain_to_html("uno\n\n dos \ntres"),
             items: Vec::new(),
+            rich_text: true,
         };
         content.convert_to_list();
         assert_eq!(content.items.len(), 3);
@@ -691,7 +888,58 @@ mod tests {
         content.items[2].done = true;
         content.convert_to_text();
         assert!(content.items.is_empty());
-        assert_eq!(content.text, "uno\n dos\ntres");
+        assert_eq!(content.text, "<div>uno</div><div> dos</div><div>tres</div>");
+    }
+
+    #[test]
+    fn sanitizer_keeps_only_the_rich_text_allowlist() {
+        let clean = sanitize_html(
+            r#"<b>Hola</b> <img src=x onerror=alert(1)><script>alert(2)</script><span style="color:#8b0000;position:fixed">rojo</span><a href="javascript:alert(3)">enlace</a>"#,
+        );
+        assert_eq!(clean, r#"<b>Hola</b> <span style="color:#8b0000">rojo</span>enlace"#);
+        assert!(!clean.contains("img"));
+        assert!(!clean.contains("script"));
+        assert!(!clean.contains("onerror"));
+        assert!(!clean.contains("javascript:"));
+    }
+
+    #[test]
+    fn html_projection_supplies_title_and_searchable_body() {
+        let mut note = sample("formato");
+        let content = Content {
+            text: "<div>Primer <b>título</b></div><div>palabra <i>buscable</i></div>".to_string(),
+            items: Vec::new(),
+            rich_text: true,
+        };
+        note.content_json = serde_json::to_string(&content).expect("json");
+        note.body_plain = content.plain(MODE_TEXT);
+        assert_eq!(note.title(), "Primer título");
+        assert_eq!(note.body_plain, "Primer título\npalabra buscable");
+    }
+
+    #[test]
+    fn migration_escapes_plain_text_once_and_is_idempotent() {
+        let db = temp_db();
+        let conn = Connection::open(&db.path).expect("raw open");
+        conn.execute_batch(SCHEMA_V1).expect("v1 schema");
+        conn.pragma_update(None, "user_version", 1).expect("v1 version");
+        conn.execute(
+            "INSERT INTO notes (id, body_plain, content_json, created_at, updated_at)
+             VALUES ('v1', 'uno < dos & tres\ndos', '{\"items\":[]}', 1, 1)",
+            [],
+        )
+        .expect("v1 note");
+
+        migrate(&conn).expect("migrate");
+        let once = require(&conn, "v1").expect("migrated");
+        assert_eq!(
+            once.content().text,
+            "<div>uno &lt; dos &amp; tres</div><div>dos</div>"
+        );
+        assert_eq!(once.body_plain, "uno < dos & tres\ndos");
+        migrate(&conn).expect("second migration");
+        let twice = require(&conn, "v1").expect("same row");
+        assert_eq!(twice.content().text, once.content().text);
     }
 
     #[test]

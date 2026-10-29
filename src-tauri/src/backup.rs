@@ -30,7 +30,7 @@ pub const KEEP: usize = 7;
 /// Marker of the JSON format written by "Exportar copia completa".
 pub const FORMAT: &str = "notas-backup";
 /// Version of that format.
-pub const VERSION: i64 = 1;
+pub const VERSION: i64 = 2;
 /// How often the background loop looks at the clock.
 const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 30);
 /// One backup per day.
@@ -289,6 +289,81 @@ pub fn exists(data_dir: &Path, name: &str) -> bool {
 
 // ------------------------------------------------------------------ markdown
 
+fn markdown_line_break(out: &mut String) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+/// Convert the app's strict rich-text subset to portable Markdown.
+fn html_to_markdown(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut lists: Vec<(bool, usize)> = Vec::new();
+    let mut index = 0;
+    while index < html.len() {
+        let Some(relative) = html[index..].find('<') else {
+            out.push_str(&db::html_to_text(&html[index..]));
+            break;
+        };
+        let start = index + relative;
+        out.push_str(&db::html_to_text(&html[index..start]));
+        let Some(relative_end) = html[start..].find('>') else {
+            out.push_str(&db::html_to_text(&html[start..]));
+            break;
+        };
+        let end = start + relative_end;
+        let tag = html[start + 1..end].trim();
+        let closing = tag.starts_with('/');
+        let name = tag
+            .trim_start_matches('/')
+            .split(|character: char| character.is_whitespace() || character == '/')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match (closing, name.as_str()) {
+            (false, "b" | "strong") | (true, "b" | "strong") => out.push_str("**"),
+            (false, "i" | "em") | (true, "i" | "em") => out.push('*'),
+            (false, "s" | "strike") | (true, "s" | "strike") => out.push_str("~~"),
+            (_, "br") => markdown_line_break(&mut out),
+            (false, "p" | "div") => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            (true, "p" | "div") => markdown_line_break(&mut out),
+            (false, "ul") => {
+                markdown_line_break(&mut out);
+                lists.push((false, 0));
+            }
+            (false, "ol") => {
+                markdown_line_break(&mut out);
+                lists.push((true, 0));
+            }
+            (true, "ul" | "ol") => {
+                lists.pop();
+                markdown_line_break(&mut out);
+            }
+            (false, "li") => {
+                markdown_line_break(&mut out);
+                if let Some((ordered, number)) = lists.last_mut() {
+                    *number += 1;
+                    if *ordered {
+                        out.push_str(&format!("{number}. "));
+                    } else {
+                        out.push_str("- ");
+                    }
+                } else {
+                    out.push_str("- ");
+                }
+            }
+            (true, "li") => markdown_line_break(&mut out),
+            _ => {}
+        }
+        index = end + 1;
+    }
+    out.trim().to_string()
+}
+
 fn markdown_note(note: &Note, tags: &[String]) -> String {
     const HIDDEN: &str = "🔒 Nota bloqueada (no se exporta su contenido)";
     let mut out = String::new();
@@ -314,9 +389,9 @@ fn markdown_note(note: &Note, tags: &[String]) -> String {
             out.push('\n');
         }
     } else {
-        let text = note.content().text;
-        if !text.trim().is_empty() {
-            out.push_str(&text);
+        let markdown = html_to_markdown(&note.content().text);
+        if !markdown.is_empty() {
+            out.push_str(&markdown);
             out.push('\n');
         }
     }
@@ -351,7 +426,7 @@ pub fn export_markdown(conn: &Connection, out: &Path) -> Result<usize, String> {
 
 // ---------------------------------------------------------------------- json
 
-fn to_note(exported: ExportedNote) -> Result<Note, String> {
+fn to_note(exported: ExportedNote, version: i64) -> Result<Note, String> {
     let mode = match exported.mode.as_str() {
         MODE_TEXT => MODE_TEXT.to_string(),
         MODE_LIST => MODE_LIST.to_string(),
@@ -362,19 +437,26 @@ fn to_note(exported: ExportedNote) -> Result<Note, String> {
     } else {
         "amarillo".to_string()
     };
+    let text = if mode == MODE_TEXT {
+        if version >= 2 {
+            db::sanitize_html(&exported.text)
+        } else {
+            db::plain_to_html(&exported.text)
+        }
+    } else {
+        exported.text
+    };
     let content = Content {
-        text: exported.text,
+        text,
         items: exported.items,
+        rich_text: true,
     };
     let (body_plain, content_json) = if exported.locked {
         (String::new(), String::new())
     } else {
-        let items_json = serde_json::to_string(&content.items)
+        let payload = serde_json::to_string(&content)
             .map_err(|error| format!("Contenido inválido: {error}"))?;
-        (
-            content.plain(&mode),
-            format!(r#"{{"items":{items_json}}}"#),
-        )
+        (content.plain(&mode), payload)
     };
     let clamp = |value: f64, low: f64, high: f64, fallback: f64| {
         if value.is_finite() {
@@ -494,6 +576,7 @@ pub fn import_json(conn: &Connection, path: &Path) -> Result<ImportSummary, Stri
     if file.notes.iter().any(|note| !valid_id(&note.id)) {
         return Err("La copia contiene una nota con un identificador inválido".to_string());
     }
+    let version = file.version;
 
     let mut summary = ImportSummary {
         imported: 0,
@@ -505,7 +588,7 @@ pub fn import_json(conn: &Connection, path: &Path) -> Result<ImportSummary, Stri
         .map_err(|error| format!("No se pudo iniciar la importación: {error}"))?;
     for exported in file.notes {
         let tags = exported.tags.clone();
-        let note = to_note(exported)?;
+        let note = to_note(exported, version)?;
         let existing = db::get(&transaction, &note.id).map_err(|error| error.to_string())?;
         match existing {
             Some(current) if note.updated_at <= current.updated_at => summary.unchanged += 1,
@@ -600,6 +683,7 @@ mod tests {
         let content = Content {
             text: text.to_string(),
             items: Vec::new(),
+            rich_text: true,
         };
         db::save_plain_content(conn, id, MODE_TEXT, &content).expect("save");
         note
@@ -670,6 +754,29 @@ mod tests {
         assert!(text.contains("🔒 Nota bloqueada (no se exporta su contenido)"));
         assert!(text.contains("Hola mundo"));
         assert!(text.contains("Etiquetas: ideas"));
+    }
+
+    #[test]
+    fn markdown_export_converts_rich_text_and_lists() {
+        let temp = temp();
+        let conn = open(&temp.root);
+        let note = Note::fresh("formato".to_string(), 20.0, 30.0);
+        db::insert_note(&conn, &note).expect("insert");
+        let content = Content {
+            text: "<div><b>Hola</b> <i>mundo</i> <s>no</s> <u>subrayado</u><span style=\"color:#8b0000;font-size:18px\"> rojo</span></div><ul><li>uno</li><li>dos</li></ul><ol><li>tres</li></ol>".to_string(),
+            items: Vec::new(),
+            rich_text: true,
+        };
+        db::save_plain_content(&conn, "formato", MODE_TEXT, &content).expect("save");
+
+        let out = temp.root.join("formato.md");
+        export_markdown(&conn, &out).expect("export");
+        let markdown = fs::read_to_string(&out).expect("read");
+        assert!(markdown.contains("**Hola** *mundo* ~~no~~ subrayado rojo"));
+        assert!(markdown.contains("- uno\n- dos"));
+        assert!(markdown.contains("1. tres"));
+        assert!(!markdown.contains("font-size"));
+        assert!(!markdown.contains("#8b0000"));
     }
 
     #[test]

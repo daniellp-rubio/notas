@@ -39,14 +39,17 @@ interface Chrome {
   badge: HTMLSpanElement;
   lock: HTMLButtonElement;
   tag: HTMLButtonElement;
+  format: HTMLButtonElement;
   menu: HTMLButtonElement;
   body: HTMLElement;
 }
 
 let note: NoteView;
 let chrome: Chrome;
-let editor: HTMLTextAreaElement | null = null;
+let editor: HTMLDivElement | null = null;
 let itemsHost: HTMLElement | null = null;
+let formattingShown = false;
+let pastePlainText = false;
 
 const saveTextSoon = debounce(() => void persistText(), SAVE_DELAY);
 const saveItemsSoon = debounce(() => void persistItems(), SAVE_DELAY);
@@ -57,7 +60,7 @@ function showError(error: unknown): void {
 
 async function persistText(): Promise<void> {
   if (!editor) return;
-  note.text = editor.value;
+  note.text = editor.innerHTML;
   try {
     await api.saveText(note.id, note.text);
   } catch (error) {
@@ -116,6 +119,17 @@ function buildShell(): void {
   bellButton.append(badge);
   const lockButton = icoButton("lock", "Contraseña", () => toggleLock());
   const tagButton = icoButton("tag", "Etiquetas", () => toggleTags());
+  const formatButton = el("button", {
+    class: "ico format-toggle",
+    text: "Aa",
+    title: "Mostrar formato",
+    attrs: { type: "button", "aria-pressed": "false" },
+  }) as HTMLButtonElement;
+  formatButton.addEventListener("click", () => {
+    formattingShown = !formattingShown;
+    paint();
+    if (note.mode === "texto" && !(note.locked && !note.unlocked)) renderBody();
+  });
   const menuButton = icoButton("dots", "Menú", () => toggleMenu());
 
   const bar = el("header", { class: "bar", attrs: { "data-tauri-drag-region": "" } }, [
@@ -126,6 +140,7 @@ function buildShell(): void {
     bellButton,
     lockButton,
     tagButton,
+    formatButton,
     menuButton,
   ]);
   const body = el("section", { class: "body" });
@@ -138,6 +153,7 @@ function buildShell(): void {
     badge,
     lock: lockButton,
     tag: tagButton,
+    format: formatButton,
     menu: menuButton,
     body,
   };
@@ -154,6 +170,10 @@ function paint(): void {
   chrome.bell.disabled = locked;
   chrome.lock.disabled = locked;
   chrome.tag.disabled = locked;
+  chrome.format.disabled = locked || note.mode !== "texto";
+  chrome.format.classList.toggle("active", formattingShown && !chrome.format.disabled);
+  chrome.format.setAttribute("aria-pressed", String(formattingShown && !chrome.format.disabled));
+  chrome.format.title = formattingShown ? "Ocultar formato" : "Mostrar formato";
 
   chrome.pin.classList.toggle("active", note.always_on_top);
   chrome.pin.title = note.always_on_top ? "Quitar de encima de todo" : "Fijar encima de todo";
@@ -192,23 +212,187 @@ function renderBody(): void {
 
 // ---------------------------------------------------------------- content
 
+const FORMAT_SIZES = [
+  { label: "Pequeño", value: "12px", text: "A−" },
+  { label: "Normal", value: "14px", text: "A" },
+  { label: "Grande", value: "18px", text: "A+" },
+];
+const FORMAT_COLORS = [
+  { label: "Negro", value: "#1f1d1a" },
+  { label: "Rojo oscuro", value: "#8b0000" },
+  { label: "Azul oscuro", value: "#003c8f" },
+  { label: "Verde oscuro", value: "#155724" },
+  { label: "Gris", value: "#5b5b5b" },
+];
+
 function editorView(): HTMLElement {
-  const area = el("textarea", {
+  const area = el("div", {
     class: "editor",
-    attrs: { placeholder: "Escribe aquí…", spellcheck: "false" },
-  }) as HTMLTextAreaElement;
-  area.value = note.text;
+    attrs: {
+      contenteditable: "true",
+      role: "textbox",
+      "aria-multiline": "true",
+      "aria-label": "Contenido de la nota",
+      "data-placeholder": "Escribe aquí…",
+      spellcheck: "true",
+    },
+  }) as HTMLDivElement;
+  area.innerHTML = note.text;
   area.addEventListener("input", () => {
-    note.text = area.value;
+    note.text = area.innerHTML;
     saveTextSoon();
   });
   area.addEventListener("blur", () => {
     saveTextSoon.cancel();
     void persistText();
   });
+  area.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "v") {
+      pastePlainText = true;
+      window.setTimeout(() => {
+        pastePlainText = false;
+      }, 0);
+      return;
+    }
+    if (!event.ctrlKey) return;
+    const command = event.key.toLowerCase();
+    if (command === "b") runEditorCommand(event, "bold");
+    if (command === "i") runEditorCommand(event, "italic");
+    if (command === "u") runEditorCommand(event, "underline");
+    if (command === "x" && event.shiftKey) runEditorCommand(event, "strikeThrough");
+  });
+  area.addEventListener("paste", (event) => {
+    event.preventDefault();
+    const clipboard = event.clipboardData;
+    if (!clipboard) return;
+    if (pastePlainText) {
+      document.execCommand("insertText", false, clipboard.getData("text/plain"));
+    } else {
+      const rich = clipboard.getData("text/html");
+      document.execCommand("insertHTML", false, sanitizePaste(rich || plainTextHtml(clipboard.getData("text/plain"))));
+    }
+  });
   editor = area;
+  const shell = el("div", { class: "editor-shell" });
+  if (formattingShown) shell.append(formatBar());
+  shell.append(area);
   if (note.text === "") requestAnimationFrame(() => area.focus());
-  return area;
+  return shell;
+}
+
+function runEditorCommand(event: KeyboardEvent, command: string): void {
+  event.preventDefault();
+  document.execCommand(command);
+  saveTextSoon();
+}
+
+function formatButton(label: string, title: string, action: () => void, className = ""): HTMLButtonElement {
+  const button = el("button", {
+    class: `format-button ${className}`.trim(),
+    text: label,
+    title,
+    attrs: { type: "button", "aria-label": title },
+  }) as HTMLButtonElement;
+  button.addEventListener("mousedown", (event) => event.preventDefault());
+  button.addEventListener("click", () => {
+    action();
+    editor?.focus();
+    saveTextSoon();
+  });
+  return button;
+}
+
+function formatBar(): HTMLElement {
+  const bar = el("div", { class: "format-bar", attrs: { role: "toolbar", "aria-label": "Formato de texto" } });
+  bar.append(
+    formatButton("B", "Negrita (Ctrl+B)", () => document.execCommand("bold"), "format-bold"),
+    formatButton("I", "Cursiva (Ctrl+I)", () => document.execCommand("italic"), "format-italic"),
+    formatButton("U", "Subrayado (Ctrl+U)", () => document.execCommand("underline"), "format-underline"),
+    formatButton("S", "Tachado (Ctrl+Mayús+X)", () => document.execCommand("strikeThrough"), "format-strike"),
+    formatButton("•", "Lista con viñetas", () => document.execCommand("insertUnorderedList"), "format-list"),
+    formatButton("1.", "Lista numerada", () => document.execCommand("insertOrderedList"), "format-list"),
+  );
+  const sizes = el("span", { class: "format-group", attrs: { "aria-label": "Tamaño de letra" } });
+  for (const size of FORMAT_SIZES) {
+    sizes.append(formatButton(size.text, size.label, () => applyInlineStyle("font-size", size.value), "format-size"));
+  }
+  const colors = el("span", { class: "format-group", attrs: { "aria-label": "Color de texto" } });
+  for (const color of FORMAT_COLORS) {
+    const button = formatButton("●", color.label, () => applyInlineStyle("color", color.value), "format-color");
+    button.style.color = color.value;
+    colors.append(button);
+  }
+  bar.append(sizes, colors, formatButton("×", "Quitar formato", () => document.execCommand("removeFormat"), "format-clear"));
+  return bar;
+}
+
+function applyInlineStyle(property: "font-size" | "color", value: string): void {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  const span = document.createElement("span");
+  span.style.setProperty(property, value);
+  try {
+    range.surroundContents(span);
+  } catch {
+    const contents = range.extractContents();
+    span.append(contents);
+    range.insertNode(span);
+  }
+  selection.removeAllRanges();
+  const next = document.createRange();
+  next.selectNodeContents(span);
+  selection.addRange(next);
+}
+
+function plainTextHtml(text: string): string {
+  const host = document.createElement("div");
+  for (const line of text.split(/\r?\n/)) {
+    const block = document.createElement("div");
+    block.textContent = line;
+    host.append(block);
+  }
+  return host.innerHTML;
+}
+
+function styleFromPaste(raw: string): string {
+  const keep: string[] = [];
+  for (const declaration of raw.split(";")) {
+    const [property, value] = declaration.split(":").map((part) => part?.trim().toLowerCase());
+    if ((property === "font-size" && FORMAT_SIZES.some((size) => size.value === value))
+      || (property === "color" && FORMAT_COLORS.some((color) => color.value === value))) {
+      if (!keep.some((item) => item.startsWith(`${property}:`))) keep.push(`${property}:${value}`);
+    }
+  }
+  return keep.join(";");
+}
+
+function sanitizePaste(raw: string): string {
+  const documentFragment = new DOMParser().parseFromString(raw, "text/html");
+  const host = document.createElement("div");
+  const allowed: Record<string, true> = {
+    p: true, br: true, div: true, b: true, strong: true, i: true, em: true, u: true, s: true, strike: true, ul: true, ol: true, li: true, span: true,
+  };
+  const forbidden: Record<string, true> = { script: true, style: true, iframe: true, object: true, embed: true, img: true };
+  const append = (source: Node, target: HTMLElement): void => {
+    if (source.nodeType === Node.TEXT_NODE) {
+      target.append(document.createTextNode(source.textContent ?? ""));
+      return;
+    }
+    if (source.nodeType !== Node.ELEMENT_NODE) return;
+    const element = source as HTMLElement;
+    const name = element.tagName.toLowerCase();
+    if (forbidden[name]) return;
+    const destination = allowed[name] ? document.createElement(name) : target;
+    if (name === "span" && destination !== target) {
+      const style = styleFromPaste(element.getAttribute("style") ?? "");
+      if (style) destination.setAttribute("style", style);
+    }
+    for (const child of Array.from(element.childNodes)) append(child, destination);
+    if (destination !== target) target.append(destination);
+  };
+  for (const child of Array.from(documentFragment.body.childNodes)) append(child, host);
+  return host.innerHTML;
 }
 
 function checklistView(): HTMLElement {

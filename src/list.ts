@@ -115,7 +115,7 @@ function visibleNotes(): NoteView[] {
     }
     if (!query) return true;
     if (note.locked) return false;
-    const haystack = `${note.title}\n${note.text}`.toLowerCase();
+    const haystack = `${note.title}\n${note.plain_text}`.toLowerCase();
     return haystack.includes(query);
   });
 }

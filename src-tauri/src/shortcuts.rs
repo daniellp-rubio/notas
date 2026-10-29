@@ -18,7 +18,7 @@ use crate::windows;
 /// Open a new note, the same as the tray item "Nueva nota".
 pub const NEW_NOTE: &str = "Ctrl+Alt+N";
 /// Hide every note, or show them all again when none is on screen.
-pub const TOGGLE_VISIBILITY: &str = "Ctrl+Alt+M";
+pub const TOGGLE_VISIBILITY: &str = "Ctrl+Alt+J";
 
 /// What the settings window shows for one shortcut.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

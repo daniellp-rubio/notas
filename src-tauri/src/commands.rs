@@ -27,6 +27,7 @@ pub struct NoteView {
     pub mode: String,
     pub title: String,
     pub text: String,
+    pub plain_text: String,
     pub items: Vec<Item>,
     pub tags: Vec<String>,
     pub visible: bool,
@@ -56,7 +57,8 @@ fn title_of(text: &str, items: &[Item], mode: &str) -> String {
             .map(|item| item.text.clone())
             .unwrap_or_default()
     } else {
-        text.lines()
+        db::html_to_text(text)
+            .lines()
             .find(|line| !line.trim().is_empty())
             .unwrap_or("")
             .to_string()
@@ -97,7 +99,16 @@ fn load_content(state: &AppState, note: &Note) -> Result<Content, String> {
     }
 }
 
-/// Persist content, encrypting it when the note has a password.
+/// Upgrade legacy plaintext inside an encrypted v1 payload before rendering it.
+fn upgrade_text_content(content: &mut Content, mode: &str) {
+    if mode == MODE_TEXT && !content.rich_text {
+        content.text = db::plain_to_html(&content.text);
+        content.rich_text = true;
+    }
+    db::normalize_content(content, mode);
+}
+
+/// Persist content, sanitizing text-mode HTML before plaintext or encrypted storage.
 fn store_content(
     conn: &Connection,
     state: &AppState,
@@ -105,6 +116,8 @@ fn store_content(
     mode: &str,
     content: &Content,
 ) -> Result<(), String> {
+    let mut content = content.clone();
+    upgrade_text_content(&mut content, mode);
     if note.locked {
         let key = state
             .key(&note.id)
@@ -115,12 +128,12 @@ fn store_content(
             .ok_or_else(|| bad("Falta la sal"))?
             .try_into()
             .map_err(|_| bad("Los datos cifrados están dañados"))?;
-        let payload = serde_json::to_vec(content).map_err(err)?;
+        let payload = serde_json::to_vec(&content).map_err(err)?;
         let sealed = crypto::seal(&key, salt, &payload).map_err(err)?;
         db::save_cipher(conn, &note.id, &sealed.cipher, &sealed.salt, &sealed.nonce).map_err(err)?;
         db::set_mode(conn, &note.id, mode).map_err(err)?;
     } else {
-        db::save_plain_content(conn, &note.id, mode, content).map_err(err)?;
+        db::save_plain_content(conn, &note.id, mode, &content).map_err(err)?;
     }
     Ok(())
 }
@@ -143,12 +156,22 @@ fn view(state: &AppState, note: &Note, tags: Vec<String>) -> Result<NoteView, St
     } else {
         title_of(&text, &items, &note.mode)
     };
+    let plain_text = if note.mode == MODE_LIST {
+        items
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        db::html_to_text(&text)
+    };
     Ok(NoteView {
         id: note.id.clone(),
         color: note.color.clone(),
         mode: note.mode.clone(),
         title,
         text,
+        plain_text,
         items,
         tags,
         visible: note.visible,
@@ -450,7 +473,9 @@ pub fn lock_note(
         if note.locked {
             return Err(bad("La nota ya tiene contraseña"));
         }
-        let payload = serde_json::to_vec(&note.content()).map_err(err)?;
+        let mut content = note.content();
+        db::normalize_content(&mut content, &note.mode);
+        let payload = serde_json::to_vec(&content).map_err(err)?;
         let (key, sealed) = crypto::seal_with_password(&password, &payload).map_err(err)?;
         db::save_cipher(&conn, &id, &sealed.cipher, &sealed.salt, &sealed.nonce).map_err(err)?;
         state.remember_key(&id, key);
@@ -479,11 +504,16 @@ pub fn unlock_note(
     let nonce = note.nonce.as_deref().ok_or_else(|| bad("Falta el nonce"))?;
     let (key, plain) = crypto::open_with_password(&password, cipher, salt, nonce)
         .map_err(|_| bad("Contraseña incorrecta"))?;
-    let content: Content =
+    let mut content: Content =
         serde_json::from_slice(&plain).map_err(|_| bad("El contenido de la nota está dañado"))?;
+    upgrade_text_content(&mut content, &note.mode);
     state.remember_key(&id, key);
-    let mut note_view = view(&state, &note, tags)?;
+    // Re-encrypt legacy text immediately, so it cannot be rendered as HTML later.
+    store_content(&conn, &state, &note, &note.mode, &content)?;
+    let stored = find(&conn, &id)?;
+    let mut note_view = view(&state, &stored, tags)?;
     note_view.title = title_of(&content.text, &content.items, &note.mode);
+    note_view.plain_text = content.plain(&note.mode);
     note_view.text = content.text;
     note_view.items = content.items;
     Ok(note_view)
@@ -519,8 +549,9 @@ pub fn remove_password(
         let nonce = note.nonce.as_deref().ok_or_else(|| bad("Falta el nonce"))?;
         let (_key, plain) = crypto::open_with_password(&password, cipher, salt, nonce)
             .map_err(|_| bad("Contraseña incorrecta"))?;
-        let content: Content = serde_json::from_slice(&plain)
+        let mut content: Content = serde_json::from_slice(&plain)
             .map_err(|_| bad("El contenido de la nota está dañado"))?;
+        upgrade_text_content(&mut content, &note.mode);
         db::clear_lock(&conn, &id, &note.mode, &content).map_err(err)?;
         state.forget_key(Some(&id));
     }

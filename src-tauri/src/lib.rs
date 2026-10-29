@@ -34,9 +34,11 @@ fn seed_first_run(conn: &rusqlite::Connection) -> Result<(), db::DbError> {
         note.width = 320.0;
         note.height = 280.0;
         let content = db::Content {
-            text: "Bienvenido a Notas\n\nArrastra la nota desde la barra de arriba.\nFija, colorea, etiqueta y pon recordatorios.\n\nLa primera línea es el título en la lista de notas."
-                .to_string(),
+            text: db::plain_to_html(
+                "Bienvenido a Notas\n\nArrastra la nota desde la barra de arriba.\nFija, colorea, etiqueta y pon recordatorios.\n\nLa primera línea es el título en la lista de notas.",
+            ),
             items: Vec::new(),
+            rich_text: true,
         };
         db::insert_note(conn, &note)?;
         db::save_plain_content(conn, &note.id, db::MODE_TEXT, &content)?;

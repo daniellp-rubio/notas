@@ -18,11 +18,13 @@ posición y estado fijado entre reinicios.
   nota al frente (la marca como visible, así sigue ahí tras reiniciar) y la deja
   como avisada. Los recordatorios que vencieron con la aplicación cerrada se avisan
   una sola vez al arrancar.
-- **Listas de verificación**: cada nota es de texto o de lista. En modo lista cada
-  elemento tiene casilla (tachado al marcarlo), `Enter` añade uno debajo, `Retroceso`
-  en un elemento vacío lo borra y la `×` lo elimina. Al cambiar de modo, las líneas
-  se convierten en elementos y viceversa (al volver a texto se pierde la marca de
-  hecho/pendiente y se avisa antes).
+- **Notas de texto y listas de verificación**: cada nota es de texto enriquecido o de lista. El
+  texto admite negrita, cursiva, subrayado, tachado, listas, tres tamaños y cinco colores desde
+  «Aa»; el contenido se guarda como HTML saneado y se exporta a Markdown sin los formatos que
+  Markdown no representa. En modo lista cada elemento tiene casilla (tachado al marcarlo),
+  `Enter` añade uno debajo, `Retroceso` en un elemento vacío lo borra y la `×` lo elimina. Al
+  cambiar de modo, las líneas se convierten en elementos y viceversa (al volver a texto se pierde
+  la marca de hecho/pendiente y se avisa antes).
 - **Etiquetas**: texto libre por nota, sin duplicados (comparación sin distinguir
   mayúsculas).
 - **Lista de notas**: ventana normal, en la barra de tareas, con el color, el título
@@ -45,7 +47,7 @@ posición y estado fijado entre reinicios.
   marca es el estado real de Windows. Una vez desactivado, seguirá desactivado en
   los siguientes arranques; la aplicación solo lo activa sola la primera vez.
 - **Atajos de teclado globales**: `Ctrl+Alt+N` crea una nota (igual que «Nueva
-  nota» de la bandeja) y `Ctrl+Alt+M` alterna entre ocultar todas las notas y
+  nota» de la bandeja) y `Ctrl+Alt+J` alterna entre ocultar todas las notas y
   mostrarlas todas. Funcionan con cualquier ventana activa. Si otro programa ya usa
   una combinación, la aplicación sigue funcionando y los ajustes muestran ese atajo
   como «No disponible (lo usa otro programa)».
@@ -101,8 +103,7 @@ npm run tauri build
 
 El resultado queda en:
 
-- `src-tauri/target/release/notas.exe` — ejecutable.
-- `src-tauri/target/release/bundle/nsis/Notas_1.1.0_x64-setup.exe` — instalador NSIS
+- `src-tauri/target/release/bundle/nsis/Notas_1.2.0_x64-setup.exe` — instalador NSIS
   para el usuario actual (no pide permisos de administrador).
 
 Comprobaciones del proyecto:

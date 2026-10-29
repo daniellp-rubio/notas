@@ -17,6 +17,7 @@ export interface NoteView {
   mode: NoteMode;
   title: string;
   text: string;
+  plain_text: string;
   items: ChecklistItem[];
   tags: string[];
   visible: boolean;
