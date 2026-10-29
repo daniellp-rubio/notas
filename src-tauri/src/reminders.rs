@@ -28,6 +28,19 @@ pub fn start(app: AppHandle) {
     });
 }
 
+/// Apply a reminder that just came due to its row: mark it as fired and leave
+/// the note visible.
+///
+/// A reminder is the app showing the note to the user, so the row must say so:
+/// without this, the window is shown but `visible` stays 0 and the note never
+/// comes back after a restart. Setting it before the window is raised also
+/// fixes the case where the note had no window yet, since the new window is
+/// built from the stored `visible` flag.
+pub fn apply_fired(conn: &rusqlite::Connection, id: &str) -> Result<(), db::DbError> {
+    db::mark_reminder_fired(conn, id)?;
+    db::set_visible(conn, id, true)
+}
+
 fn tick(app: &AppHandle) {
     let state = app.state::<AppState>();
     let conn = match state.conn() {
@@ -56,7 +69,7 @@ fn tick(app: &AppHandle) {
                     continue;
                 }
             };
-            if let Err(error) = db::mark_reminder_fired(&conn, &id) {
+            if let Err(error) = apply_fired(&conn, &id) {
                 eprintln!("[notas] no se pudo marcar el recordatorio {id}: {error}");
             }
         }
@@ -96,13 +109,49 @@ fn title_of(app: &AppHandle, id: &str) -> String {
 }
 
 fn notify(app: &AppHandle, title: &str) {
+    // `Default` asks Windows for the normal notification sound. Without a
+    // sound the toast is built with `<audio silent="true"/>`, i.e. silent.
     let result = app
         .notification()
         .builder()
         .title("Recordatorio de Notas")
         .body(title)
+        .sound("Default")
         .show();
     if let Err(error) = result {
         eprintln!("[notas] no se pudo mostrar la notificación: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firing_a_reminder_leaves_the_note_visible() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let conn = db::open(&dir.path().join("notas.db")).expect("open");
+        let mut note = db::Note::fresh("oculta".to_string(), 10.0, 10.0);
+        note.visible = false;
+        db::insert_note(&conn, &note).expect("insert");
+        db::set_reminder(&conn, "oculta", Some(db::now_ms() - 1_000)).expect("reminder");
+        assert!(!db::require(&conn, "oculta").expect("load").visible);
+
+        let due = db::due_reminders(&conn, db::now_ms()).expect("due");
+        assert_eq!(due, vec!["oculta".to_string()]);
+
+        apply_fired(&conn, "oculta").expect("fire");
+        let fired = db::require(&conn, "oculta").expect("load");
+        assert!(fired.reminder_fired);
+        assert!(
+            fired.visible,
+            "a note shown by its reminder must still be visible after a restart"
+        );
+        assert!(db::due_reminders(&conn, db::now_ms()).expect("due").is_empty());
+
+        // The stored flag is what a restart reads: simulate it.
+        drop(conn);
+        let conn = db::open(&dir.path().join("notas.db")).expect("reopen");
+        assert!(db::require(&conn, "oculta").expect("load").visible);
     }
 }
