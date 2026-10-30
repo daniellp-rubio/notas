@@ -27,6 +27,11 @@ posición y estado fijado entre reinicios.
   la marca de hecho/pendiente y se avisa antes).
 - **Etiquetas**: texto libre por nota, sin duplicados (comparación sin distinguir
   mayúsculas).
+- **Pegar a una ventana**: desde el menú de una nota se elige una ventana abierta y
+  se la pega a cualquier ventana de ese programa o a las que contengan un texto en
+  el título. La nota solo aparece mientras la ventana coincida y esté al frente (o al
+  editar la propia nota); «Despegar» la devuelve al escritorio. La regla se conserva
+  en las copias JSON y la sincronización.
 - **Lista de notas**: ventana normal, en la barra de tareas, con el color, el título
   (la primera línea del texto), las etiquetas y el estado de cada nota. Incluye
   búsqueda sobre las notas sin contraseña, filtro por etiqueta y acciones para
@@ -60,16 +65,20 @@ posición y estado fijado entre reinicios.
   notas sin contraseña (título como encabezado, cuerpo, listas como `- [ ]` / `- [x]`
   y una línea de etiquetas); las bloqueadas solo dejan el texto
   «🔒 Nota bloqueada (no se exporta su contenido)». «Exportar copia completa (.json)»
-  guarda todo (notas, etiquetas, posición, tamaño, color, recordatorios) en un
-  archivo versionado; las bloqueadas van como cifrado, sal y nonce en base64.
-  «Importar copia (.json)» añade las notas que faltan y solo reemplaza una nota
-  existente cuando la copia es más nueva, con un resumen de cuántas se importaron,
-  actualizaron o quedaron igual. «Restaurar copia automática» hace antes una copia
-  de seguridad de las notas actuales y recarga las ventanas.
+  guarda todo en un archivo versionado; las bloqueadas van como cifrado, sal y nonce
+  en base64. También incluye reglas de «Pegar a una ventana». «Importar copia (.json)»
+  añade las notas que faltan y solo reemplaza una nota existente cuando la copia es más
+  nueva, con un resumen de cuántas se importaron, actualizaron o quedaron igual.
+  «Restaurar copia automática» hace antes una copia de seguridad de las notas actuales
+  y recarga las ventanas.
 - **Ajustes**: ventana propia (en la barra de tareas) con «Iniciar con Windows», el
-  estado de los atajos, las copias de seguridad (última fecha, hacer una copia
-  ahora, restaurar, abrir la carpeta, exportar e importar) y un apartado de
-  sincronización reservado para más adelante.
+  estado de los atajos, las copias de seguridad (última fecha, hacer una copia ahora,
+  restaurar, abrir la carpeta, exportar e importar) y sincronización por una carpeta
+  elegida por ti. Nunca se activa sola.
+- **Sincronización por carpeta**: guarda una nota JSON por archivo en
+  `Notas-sync\notes\`, un `Notas.md` legible y `LEEME.md` dentro de una carpeta de
+  OneDrive, Drive u otro servicio que elijas. Las notas bloqueadas permanecen
+  cifradas; las notas desbloqueadas están legibles en `Notas.md`.
 - **Bandeja del sistema**: «Nueva nota», «Mostrar todas», «Ocultar todas», «Lista de
   notas», «Ajustes…», «Iniciar con Windows» y «Salir». El clic izquierdo en el icono
   muestra todas las notas. Cerrar una nota solo la oculta; la aplicación se cierra
@@ -79,6 +88,10 @@ posición y estado fijado entre reinicios.
 > ⚠️ **Si olvidas la contraseña de una nota, su contenido no se puede recuperar.**
 > No hay puerta trasera ni copia del texto en claro: sin la contraseña, los datos
 > cifrados son ilegibles, incluso para el desarrollador.
+
+> ⚠️ **Elige una carpeta privada para sincronizar.** La carpeta contiene los datos
+> cifrados de las notas bloqueadas, pero también un `Notas.md` legible con todas las
+> notas sin contraseña.
 
 ## Requisitos
 
@@ -103,7 +116,7 @@ npm run tauri build
 
 El resultado queda en:
 
-- `src-tauri/target/release/bundle/nsis/Notas_1.2.0_x64-setup.exe` — instalador NSIS
+- `src-tauri/target/release/bundle/nsis/Notas_2.0.0_x64-setup.exe` — instalador NSIS
   para el usuario actual (no pide permisos de administrador).
 
 Comprobaciones del proyecto:
@@ -124,19 +137,27 @@ Una única base SQLite en el directorio de datos de la aplicación:
 %APPDATA%\com.dafel.notas\notas.db
 ```
 
-Contiene las notas, sus etiquetas y los recordatorios. Las notas con contraseña
-guardan solo el texto cifrado; las columnas de texto en claro quedan vacías. La base
-tiene `schema_version` (`PRAGMA user_version`) y se migra de forma idempotente al
-arrancar. Para empezar de cero basta con cerrar la aplicación y borrar ese archivo.
-
-Las copias automáticas viven en `%APPDATA%\com.dafel.notas\backups\`. Las que se
-hacen antes de restaurar llevan otro nombre (`notas-pre-restauracion-…`) y no entran
-en la rotación de 7.
+Contiene las notas, sus etiquetas, recordatorios, reglas de ventana y el estado local
+de sincronización. Las notas con contraseña guardan solo el texto cifrado; las columnas
+de texto en claro quedan vacías. La base tiene `schema_version` (`PRAGMA user_version`)
+y se migra de forma idempotente al arrancar. Para empezar de cero basta con cerrar la
+aplicación y borrar ese archivo.
 
 «Iniciar con Windows» no se guarda en la base: es un valor llamado `Notas` bajo
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, que Windows consulta al iniciar
 sesión. Al desactivarlo desde la bandeja, ese valor se elimina.
 
+
+## Cómo funciona la sincronización
+
+Al elegir una carpeta, Notas crea `Notas-sync\`. Sincroniza al arrancar, cada 60
+segundos, cinco segundos después de modificar una nota y al pulsar «Sincronizar ahora».
+Cada archivo `notes\<id>.json` lleva `updated_at`, `device_id` y una marca de borrado.
+Gana la versión más reciente; si empatan, gana el `device_id` mayor. Cuando ambas
+versiones cambiaron desde la última sincronización correcta, también se guarda una copia
+del perdedor con el título «(conflicto) …». Los borrados se propagan como marcas que se
+conservan 30 días. Una posición, tamaño o visibilidad nunca se copia entre dispositivos.
+Los archivos JSON corruptos se omiten y el error aparece en Ajustes.
 ## Estructura
 
 ```
@@ -154,6 +175,8 @@ src-tauri/
   src/crypto.rs       AES-256-GCM + Argon2id
   src/state.rs        conexión, claves de sesión e ítem de la bandeja
   src/windows.rs      creación, restauración y visibilidad de ventanas
+  src/attachments.rs  reglas de ventana en primer plano
+  src/sync.rs         sincronización de carpeta y resolución de conflictos
   src/reminders.rs    hilo de recordatorios (cada 15 s)
   src/backup.rs       copias automáticas, exportar e importar
   src/shortcuts.rs    atajos de teclado globales

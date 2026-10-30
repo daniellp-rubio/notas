@@ -195,7 +195,20 @@ pub fn show_note(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Show every note (the manager window is left alone).
+/// Show an attachment-controlled note without stealing focus from the matched
+/// application. Creating a missing webview still uses the safe worker hop.
+pub fn show_note_quietly(app: &AppHandle, id: &str) {
+    if let Some(window) = app.get_webview_window(&note_label(id)) {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_skip_taskbar(true);
+    } else {
+        spawn_note(app, id);
+    }
+}
+
+/// Show every note (the manager window is left alone). Attachment-controlled
+/// notes keep following the foreground rule instead of being forced visible.
 pub fn show_all(app: &AppHandle, state: &AppState) -> Result<(), String> {
     let notes = {
         let conn = state.conn()?;
@@ -206,8 +219,11 @@ pub fn show_all(app: &AppHandle, state: &AppState) -> Result<(), String> {
             let conn = state.conn()?;
             db::set_visible(&conn, &note.id, true).map_err(|e| e.to_string())?;
         }
-        show_note(app, &note.id)?;
+        if note.attach_kind.is_none() {
+            show_note(app, &note.id)?;
+        }
     }
+    crate::attachments::refresh(app);
     let _ = app.emit("notes-changed", "");
     Ok(())
 }
@@ -250,9 +266,13 @@ pub fn reload_all(app: &AppHandle, state: &AppState) -> Result<(), String> {
         let conn = state.conn()?;
         db::list(&conn).map_err(|error| error.to_string())?
     };
-    for note in notes.iter().filter(|note| note.visible) {
+    for note in notes
+        .iter()
+        .filter(|note| note.visible && note.attach_kind.is_none())
+    {
         spawn_note(app, &note.id);
     }
+    crate::attachments::refresh(app);
     let _ = app.emit("notes-changed", "");
     Ok(())
 }
@@ -266,7 +286,10 @@ pub fn restore(app: &AppHandle, state: &AppState) -> Result<(), String> {
         let conn = state.conn()?;
         db::list(&conn).map_err(|e| e.to_string())?
     };
-    for note in notes.iter().filter(|note| note.visible) {
+    for note in notes
+        .iter()
+        .filter(|note| note.visible && note.attach_kind.is_none())
+    {
         open_note(app, note).map_err(|e| e.to_string())?;
     }
     Ok(())

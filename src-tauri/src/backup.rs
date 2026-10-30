@@ -52,43 +52,48 @@ pub struct ImportSummary {
     pub unchanged: usize,
 }
 
-/// One note inside the JSON copy.
+/// One note inside the JSON copy. Sync reuses this content schema, while
+/// deliberately omitting the device-local window geometry and visibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ExportedNote {
-    id: String,
-    color: String,
-    mode: String,
+pub(crate) struct ExportedNote {
+    pub(crate) id: String,
+    pub(crate) color: String,
+    pub(crate) mode: String,
     #[serde(default)]
-    text: String,
+    pub(crate) text: String,
     #[serde(default)]
-    items: Vec<Item>,
+    pub(crate) items: Vec<Item>,
     #[serde(default)]
-    locked: bool,
+    pub(crate) locked: bool,
     /// Base64 of the AES-GCM ciphertext (locked notes only).
     #[serde(default)]
-    cipher: Option<String>,
+    pub(crate) cipher: Option<String>,
     /// Base64 of the Argon2id salt (locked notes only).
     #[serde(default)]
-    salt: Option<String>,
+    pub(crate) salt: Option<String>,
     /// Base64 of the AES-GCM nonce (locked notes only).
     #[serde(default)]
-    nonce: Option<String>,
+    pub(crate) nonce: Option<String>,
     #[serde(default)]
-    always_on_top: bool,
+    pub(crate) always_on_top: bool,
     #[serde(default = "default_true")]
-    visible: bool,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
+    pub(crate) visible: bool,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
     #[serde(default)]
-    reminder_at: Option<i64>,
+    pub(crate) reminder_at: Option<i64>,
     #[serde(default)]
-    reminder_fired: bool,
-    created_at: i64,
-    updated_at: i64,
+    pub(crate) reminder_fired: bool,
     #[serde(default)]
-    tags: Vec<String>,
+    pub(crate) attach_kind: Option<String>,
+    #[serde(default)]
+    pub(crate) attach_value: Option<String>,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
 }
 
 /// The whole JSON file.
@@ -426,7 +431,7 @@ pub fn export_markdown(conn: &Connection, out: &Path) -> Result<usize, String> {
 
 // ---------------------------------------------------------------------- json
 
-fn to_note(exported: ExportedNote, version: i64) -> Result<Note, String> {
+pub(crate) fn to_note(exported: ExportedNote, version: i64) -> Result<Note, String> {
     let mode = match exported.mode.as_str() {
         MODE_TEXT => MODE_TEXT.to_string(),
         MODE_LIST => MODE_LIST.to_string(),
@@ -492,13 +497,15 @@ fn to_note(exported: ExportedNote, version: i64) -> Result<Note, String> {
         height: clamp(exported.height, 160.0, 4000.0, 260.0),
         reminder_at: exported.reminder_at,
         reminder_fired: exported.reminder_fired,
+        attach_kind: exported.attach_kind,
+        attach_value: exported.attach_value,
         created_at: exported.created_at,
         updated_at: exported.updated_at,
     })
 }
 
 /// Locked notes are written as cipher + salt + nonce, never as plaintext.
-fn export_one(note: &Note, tags: Vec<String>) -> Result<ExportedNote, String> {
+pub(crate) fn export_one(note: &Note, tags: Vec<String>) -> Result<ExportedNote, String> {
     let (text, items) = if note.locked {
         (String::new(), Vec::new())
     } else {
@@ -524,6 +531,8 @@ fn export_one(note: &Note, tags: Vec<String>) -> Result<ExportedNote, String> {
         height: note.height,
         reminder_at: note.reminder_at,
         reminder_fired: note.reminder_fired,
+        attach_kind: note.attach_kind.clone(),
+        attach_value: note.attach_value.clone(),
         created_at: note.created_at,
         updated_at: note.updated_at,
         tags,

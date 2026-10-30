@@ -37,6 +37,7 @@ interface Chrome {
   pin: HTMLButtonElement;
   bell: HTMLButtonElement;
   badge: HTMLSpanElement;
+  attachment: HTMLSpanElement;
   lock: HTMLButtonElement;
   tag: HTMLButtonElement;
   format: HTMLButtonElement;
@@ -131,10 +132,15 @@ function buildShell(): void {
     if (note.mode === "texto" && !(note.locked && !note.unlocked)) renderBody();
   });
   const menuButton = icoButton("dots", "Menú", () => toggleMenu());
+  const attachment = el("span", {
+    class: "attachment-chip",
+    attrs: { hidden: "", title: "Pegada a una ventana" },
+  }) as HTMLSpanElement;
 
   const bar = el("header", { class: "bar", attrs: { "data-tauri-drag-region": "" } }, [
     newButton,
     el("span", { class: "bar-fill", attrs: { "data-tauri-drag-region": "" } }),
+    attachment,
     colorButton,
     pinButton,
     bellButton,
@@ -151,6 +157,7 @@ function buildShell(): void {
     pin: pinButton,
     bell: bellButton,
     badge,
+    attachment,
     lock: lockButton,
     tag: tagButton,
     format: formatButton,
@@ -183,6 +190,9 @@ function paint(): void {
   chrome.bell.classList.toggle("with-badge", time !== "");
   chrome.bell.classList.toggle("active", time !== "");
   chrome.bell.title = time ? `Recordatorio: ${time}` : "Recordatorio";
+
+  chrome.attachment.textContent = note.attachment ? `📎 ${note.attachment}` : "";
+  chrome.attachment.hidden = !note.attachment;
 
   chrome.lock.classList.toggle("active", note.locked);
   chrome.tag.classList.toggle("active", note.tags.length > 0 && !locked);
@@ -794,6 +804,85 @@ function toggleTags(): void {
   });
 }
 
+function toggleAttachment(): void {
+  openPopover(chrome.menu, () => {
+    const body = el("div", { class: "pop-body" }, [
+      el("p", { class: "pop-title", text: "Pegar a una ventana" }),
+      el("p", { class: "pop-note", text: "Buscando ventanas abiertas…" }),
+    ]);
+    void api
+      .listAttachableWindows()
+      .then((windows) => {
+        if (windows.length === 0) {
+          body.replaceChildren(
+            el("p", { class: "pop-title", text: "Pegar a una ventana" }),
+            el("p", { class: "pop-note", text: "No hay ventanas disponibles." }),
+          );
+          return;
+        }
+        const picker = el("select", {
+          class: "field select",
+          attrs: { "aria-label": "Ventana abierta" },
+        }) as HTMLSelectElement;
+        windows.forEach((window, index) => {
+          picker.append(
+            el("option", { text: `${window.title} — ${window.exe}`, attrs: { value: String(index) } }),
+          );
+        });
+        const kind = el("select", {
+          class: "field select",
+          attrs: { "aria-label": "Tipo de regla" },
+        }) as HTMLSelectElement;
+        kind.append(
+          el("option", { text: "Este programa", attrs: { value: "exe" } }),
+          el("option", { text: "Ventanas cuyo título contiene…", attrs: { value: "title" } }),
+        );
+        const value = el("input", {
+          class: "field",
+          attrs: { type: "text", "aria-label": "Texto de la regla" },
+        }) as HTMLInputElement;
+        const fill = () => {
+          const current = windows[Number(picker.value)] ?? windows[0];
+          value.value = kind.value === "exe" ? current.exe : current.title;
+          value.readOnly = kind.value === "exe";
+        };
+        picker.addEventListener("change", fill);
+        kind.addEventListener("change", fill);
+        fill();
+        const save = el("button", { class: "btn primary", text: "Pegar", attrs: { type: "button" } });
+        save.addEventListener("click", async () => {
+          try {
+            await api.attachNote(note.id, kind.value as "exe" | "title", value.value);
+            note.attachment = kind.value === "exe" ? value.value.toUpperCase() : value.value;
+            closePopover();
+            paint();
+          } catch (error) {
+            showError(error);
+          }
+        });
+        body.replaceChildren(
+          el("p", { class: "pop-title", text: "Pegar a una ventana" }),
+          picker,
+          kind,
+          value,
+          el("div", { class: "pop-actions" }, [save]),
+        );
+      })
+      .catch(showError);
+    return body;
+  });
+}
+
+async function detachAttachment(): Promise<void> {
+  try {
+    await api.detachNote(note.id);
+    note.attachment = null;
+    paint();
+  } catch (error) {
+    showError(error);
+  }
+}
+
 function toggleMenu(): void {
   const lockedAtRest = note.locked && !note.unlocked;
   openPopover(chrome.menu, () => {
@@ -812,6 +901,21 @@ function toggleMenu(): void {
       });
       body.append(mode);
     }
+
+    const attachment = el("button", {
+      class: "menu-item",
+      text: note.attachment ? "Despegar" : "Pegar a una ventana…",
+      attrs: { type: "button" },
+    });
+    attachment.addEventListener("click", () => {
+      closePopover();
+      if (note.attachment) {
+        void detachAttachment();
+      } else {
+        toggleAttachment();
+      }
+    });
+    body.append(attachment);
 
     const hide = el("button", { class: "menu-item", text: "Ocultar", attrs: { type: "button" } });
     hide.addEventListener("click", () => {
@@ -935,6 +1039,7 @@ async function refresh(): Promise<void> {
     note.tags = next.tags;
     note.reminder_at = next.reminder_at;
     note.visible = next.visible;
+    note.attachment = next.attachment;
     note.title = next.title;
     if (structural) {
       note.mode = next.mode;

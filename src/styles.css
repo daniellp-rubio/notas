@@ -84,6 +84,15 @@ button {
   min-width: 4px;
 }
 
+.attachment-chip {
+  max-width: 130px;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ico {
   display: inline-flex;
   align-items: center;
@@ -918,6 +927,10 @@ body.settings-mode {
   margin: 0;
   font-size: 12px;
   color: #6f6b60;
+}
+
+.sync-error {
+  color: var(--danger);
 }
 
 .sect-label {

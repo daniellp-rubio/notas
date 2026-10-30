@@ -2,7 +2,7 @@
 //!
 //! The library owns every piece of state (SQLite + derived keys) and exposes it
 //! through commands; the frontend is a thin view that never touches the disk.
-
+mod attachments;
 mod autostart;
 mod backup;
 mod commands;
@@ -11,6 +11,7 @@ mod db;
 mod reminders;
 mod shortcuts;
 mod state;
+mod sync;
 mod tray;
 mod windows;
 
@@ -71,6 +72,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     app.state::<AppState>().set_shortcuts(status);
     reminders::start(app.handle().clone());
     backup::start_scheduler(app.handle().clone());
+    attachments::start(app.handle().clone());
+    sync::start(app.handle().clone());
     Ok(())
 }
 
@@ -131,6 +134,12 @@ pub fn run() {
             commands::set_autostart,
             commands::open_settings,
             commands::settings_state,
+            commands::choose_sync_folder,
+            commands::disable_sync,
+            commands::sync_now,
+            commands::list_attachable_windows,
+            commands::attach_note,
+            commands::detach_note,
             commands::backup_now,
             commands::restore_backup,
             commands::open_backups_folder,

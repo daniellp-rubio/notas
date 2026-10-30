@@ -9,12 +9,14 @@ use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::attachments;
 use crate::autostart;
 use crate::backup;
 use crate::crypto::{self, NONCE_LEN, SALT_LEN};
 use crate::db::{self, Content, Item, Note, COLORS, MODE_LIST, MODE_TEXT};
 use crate::shortcuts::ShortcutInfo;
 use crate::state::AppState;
+use crate::sync;
 use crate::windows;
 
 const NOT_FOUND: &str = "La nota no existe";
@@ -35,6 +37,7 @@ pub struct NoteView {
     pub unlocked: bool,
     pub always_on_top: bool,
     pub reminder_at: Option<i64>,
+    pub attachment: Option<String>,
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -47,6 +50,11 @@ fn err<E: std::fmt::Display>(error: E) -> String {
 
 fn bad(message: &str) -> String {
     message.to_string()
+}
+
+fn note_changed(app: &AppHandle, id: &str) {
+    let _ = app.emit("notes-changed", id);
+    sync::schedule(app);
 }
 
 fn title_of(text: &str, items: &[Item], mode: &str) -> String {
@@ -179,6 +187,7 @@ fn view(state: &AppState, note: &Note, tags: Vec<String>) -> Result<NoteView, St
         unlocked,
         always_on_top: note.always_on_top,
         reminder_at: note.reminder_at,
+        attachment: attachments::rule_label(note),
         x: note.x,
         y: note.y,
         width: note.width,
@@ -197,7 +206,7 @@ pub fn create_note_impl(app: &AppHandle, state: &AppState) -> Result<NoteView, S
         note
     };
     windows::spawn_note(app, &created.id);
-    let _ = app.emit("notes-changed", &created.id);
+    note_changed(app, &created.id);
     view(state, &created, Vec::new())
 }
 
@@ -252,7 +261,7 @@ pub fn save_text(
         content.text = text;
         store_content(&conn, &state, &note, &note.mode, &content)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -273,7 +282,7 @@ pub fn save_items(
         content.items = items;
         store_content(&conn, &state, &note, &note.mode, &content)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -307,7 +316,7 @@ pub fn set_mode(
             view(&state, &stored, tags)?
         }
     };
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(view)
 }
 
@@ -325,7 +334,7 @@ pub fn set_color(
         let conn = state.conn()?;
         db::set_color(&conn, &id, &color).map_err(err)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -345,7 +354,7 @@ pub fn set_pin(
             .set_always_on_top(pin)
             .map_err(|error| bad(&error.to_string()))?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -387,7 +396,7 @@ pub fn set_reminder(
         let conn = state.conn()?;
         db::set_reminder(&conn, &id, at).map_err(err)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -407,7 +416,7 @@ pub fn set_visible(
     } else if let Some(window) = app.get_webview_window(&windows::note_label(&id)) {
         window.hide().map_err(err)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -415,13 +424,57 @@ pub fn set_visible(
 pub fn delete_note(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     {
         let conn = state.conn()?;
+        find(&conn, &id)?;
+        sync::record_local_delete(&conn, &id)?;
         db::delete_note(&conn, &id).map_err(err)?;
     }
     state.forget_key(Some(&id));
     if let Some(window) = app.get_webview_window(&windows::note_label(&id)) {
         window.destroy().map_err(err)?;
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_attachable_windows() -> Result<Vec<attachments::Candidate>, String> {
+    attachments::list_candidates()
+}
+
+#[tauri::command(async)]
+pub fn attach_note(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+    kind: String,
+    value: String,
+) -> Result<(), String> {
+    if kind != attachments::KIND_EXE && kind != attachments::KIND_TITLE {
+        return Err(bad("Tipo de regla desconocido"));
+    }
+    let value = value.trim();
+    if value.is_empty() || value.len() > 500 {
+        return Err(bad("La regla de ventana no es válida"));
+    }
+    {
+        let conn = state.conn()?;
+        find(&conn, &id)?;
+        db::set_attachment(&conn, &id, Some(&kind), Some(value)).map_err(err)?;
+    }
+    attachments::refresh(&app);
+    note_changed(&app, &id);
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn detach_note(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+    {
+        let conn = state.conn()?;
+        find(&conn, &id)?;
+        db::set_attachment(&conn, &id, None, None).map_err(err)?;
+    }
+    windows::show_note(&app, &id)?;
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -436,7 +489,7 @@ pub fn add_tag(
         let conn = state.conn()?;
         db::add_tag(&conn, &id, &tag).map_err(err)?
     };
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(tags)
 }
 
@@ -451,7 +504,7 @@ pub fn remove_tag(
         let conn = state.conn()?;
         db::remove_tag(&conn, &id, &tag).map_err(err)?
     };
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(tags)
 }
 
@@ -480,7 +533,7 @@ pub fn lock_note(
         db::save_cipher(&conn, &id, &sealed.cipher, &sealed.salt, &sealed.nonce).map_err(err)?;
         state.remember_key(&id, key);
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -523,7 +576,7 @@ pub fn unlock_note(
 #[tauri::command]
 pub fn relock_note(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.forget_key(Some(&id));
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -555,7 +608,7 @@ pub fn remove_password(
         db::clear_lock(&conn, &id, &note.mode, &content).map_err(err)?;
         state.forget_key(Some(&id));
     }
-    let _ = app.emit("notes-changed", &id);
+    note_changed(&app, &id);
     Ok(())
 }
 
@@ -607,6 +660,7 @@ pub struct SettingsState {
     pub last_backup_at: Option<i64>,
     pub backups: Vec<backup::BackupEntry>,
     pub shortcuts: Vec<ShortcutInfo>,
+    pub sync: sync::SyncStatus,
 }
 
 fn data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -661,6 +715,14 @@ fn open_dialog(
         .and_then(|path| path.into_path().ok())
 }
 
+fn folder_dialog(app: &AppHandle) -> Option<PathBuf> {
+    app.dialog()
+        .file()
+        .set_title("Elegir carpeta de sincronización")
+        .blocking_pick_folder()
+        .and_then(|path| path.into_path().ok())
+}
+
 /// Open the settings window (never on the main thread: see `windows`).
 #[tauri::command(async)]
 pub fn open_settings(app: AppHandle) {
@@ -671,15 +733,84 @@ pub fn open_settings(app: AppHandle) {
 pub fn settings_state(app: AppHandle, state: State<'_, AppState>) -> Result<SettingsState, String> {
     let folder = data_dir(&app)?;
     let autostart = autostart::is_enabled(&app).unwrap_or(false);
-    let (last_backup_at, backups) = {
+    let (last_backup_at, backups, sync_status) = {
         let conn = state.conn()?;
-        (backup::last_at(&conn, &folder), backup::list(&folder))
+        (
+            backup::last_at(&conn, &folder),
+            backup::list(&folder),
+            sync::status(&conn)?,
+        )
     };
     Ok(SettingsState {
         autostart,
         last_backup_at,
         backups,
         shortcuts: state.shortcuts(),
+        sync: sync_status,
+    })
+}
+
+/// Rebuild windows after a remote merge without holding the IPC response open.
+fn reload_after_sync(app: &AppHandle) {
+    let handle = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("notas-sync-reload".to_string())
+        .spawn(move || {
+            let state = handle.state::<AppState>();
+            if let Err(error) = windows::reload_all(&handle, &state) {
+                eprintln!("[notas] no se pudieron recargar las notas sincronizadas: {error}");
+            }
+            attachments::refresh(&handle);
+        });
+}
+
+/// Select and enable a cloud parent folder. Synchronization itself is explicit
+/// and runs on the file worker so the native picker never blocks WebView IPC.
+#[tauri::command(async)]
+pub fn choose_sync_folder(
+    app: AppHandle,
+    path: Option<String>,
+) -> Result<Option<sync::SyncStatus>, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let picked = match path {
+            Some(path) => Some(PathBuf::from(path)),
+            None => folder_dialog(&handle),
+        };
+        let Some(folder) = picked else { return Ok(None) };
+        let state = handle.state::<AppState>();
+        let conn = state.conn()?;
+        sync::configure(&conn, &folder)?;
+        let device = sync::device_id(&conn)?;
+        sync::sync_now(&conn, &folder, &device)?;
+        let status = sync::status(&conn)?;
+        drop(conn);
+        reload_after_sync(&handle);
+        Ok(Some(status))
+    })
+}
+
+#[tauri::command]
+pub fn disable_sync(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.conn()?;
+    sync::disable(&conn)
+}
+
+#[tauri::command(async)]
+pub fn sync_now(app: AppHandle) -> Result<sync::SyncResult, String> {
+    let handle = app.clone();
+    blocking(move || {
+        let state = handle.state::<AppState>();
+        let conn = state.conn()?;
+        let status = sync::status(&conn)?;
+        let folder = status
+            .folder
+            .ok_or_else(|| bad("Elige primero una carpeta de sincronización"))?;
+        let device = sync::device_id(&conn)?;
+        let result = sync::sync_now(&conn, PathBuf::from(folder).as_path(), &device)?;
+        drop(conn);
+        reload_after_sync(&handle);
+        Ok(result)
     })
 }
 

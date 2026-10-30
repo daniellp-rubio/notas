@@ -13,7 +13,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 /// Bump when the schema changes and add a migration step below.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
@@ -248,6 +248,7 @@ pub struct Note {
     pub nonce: Option<Vec<u8>>,
     pub locked: bool,
     pub always_on_top: bool,
+    /// User intent. Attachment rules may hide a window without changing this.
     pub visible: bool,
     pub x: f64,
     pub y: f64,
@@ -255,6 +256,8 @@ pub struct Note {
     pub height: f64,
     pub reminder_at: Option<i64>,
     pub reminder_fired: bool,
+    pub attach_kind: Option<String>,
+    pub attach_value: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -285,6 +288,8 @@ impl Note {
             height: 260.0,
             reminder_at: None,
             reminder_fired: false,
+            attach_kind: None,
+            attach_value: None,
             created_at: now,
             updated_at: now,
         }
@@ -381,11 +386,55 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     if version < 2 {
         migrate_plain_text_to_html(conn)?;
     }
+    if version < 3 {
+        add_attachment_columns(conn)?;
+    }
+    if version < 4 {
+        create_sync_tables(conn)?;
+    }
     if version < SCHEMA_VERSION {
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
-    // `CREATE TABLE IF NOT EXISTS` also repairs rows added by hand.
+    // Repairs manually-created databases and makes every migration idempotent.
     conn.execute_batch(SCHEMA_V1)?;
+    add_attachment_columns(conn)?;
+    create_sync_tables(conn)?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, name: &str) -> Result<bool> {
+    let mut statement = conn.prepare("PRAGMA table_info(notes)")?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_attachment_columns(conn: &Connection) -> Result<()> {
+    if !has_column(conn, "attach_kind")? {
+        conn.execute("ALTER TABLE notes ADD COLUMN attach_kind TEXT", [])?;
+    }
+    if !has_column(conn, "attach_value")? {
+        conn.execute("ALTER TABLE notes ADD COLUMN attach_value TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn create_sync_tables(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS sync_state (
+            note_id TEXT PRIMARY KEY,
+            last_synced_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_tombstones (
+            note_id TEXT PRIMARY KEY,
+            deleted_at INTEGER NOT NULL,
+            device_id TEXT NOT NULL
+        );",
+    )?;
     Ok(())
 }
 
@@ -442,6 +491,8 @@ fn map_note(row: &Row<'_>) -> rusqlite::Result<Note> {
         height: row.get("height")?,
         reminder_at: row.get("reminder_at")?,
         reminder_fired: row.get::<_, i64>("reminder_fired")? != 0,
+        attach_kind: row.get("attach_kind")?,
+        attach_value: row.get("attach_value")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -451,8 +502,8 @@ pub fn insert_note(conn: &Connection, note: &Note) -> Result<()> {
     conn.execute(
         "INSERT INTO notes (id, color, mode, body_plain, content_json, body_cipher, salt, nonce,
                             locked, always_on_top, visible, x, y, width, height, reminder_at,
-                            reminder_fired, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                            reminder_fired, attach_kind, attach_value, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
         params![
             note.id,
             note.color,
@@ -471,6 +522,8 @@ pub fn insert_note(conn: &Connection, note: &Note) -> Result<()> {
             note.height,
             note.reminder_at,
             i64::from(note.reminder_fired),
+            note.attach_kind,
+            note.attach_value,
             note.created_at,
             note.updated_at,
         ],
@@ -577,10 +630,12 @@ pub fn set_pin(conn: &Connection, id: &str, pin: bool) -> Result<()> {
     Ok(())
 }
 
+/// Visibility and geometry are local-device state. They deliberately do not
+/// advance `updated_at`, so a cloud sync never overwrites another device's layout.
 pub fn set_visible(conn: &Connection, id: &str, visible: bool) -> Result<()> {
     conn.execute(
-        "UPDATE notes SET visible = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, i64::from(visible), now_ms()],
+        "UPDATE notes SET visible = ?2 WHERE id = ?1",
+        params![id, i64::from(visible)],
     )?;
     Ok(())
 }
@@ -594,8 +649,74 @@ pub fn set_geometry(
     height: f64,
 ) -> Result<()> {
     conn.execute(
-        "UPDATE notes SET x = ?2, y = ?3, width = ?4, height = ?5, updated_at = ?6 WHERE id = ?1",
-        params![id, x, y, width, height, now_ms()],
+        "UPDATE notes SET x = ?2, y = ?3, width = ?4, height = ?5 WHERE id = ?1",
+        params![id, x, y, width, height],
+    )?;
+    Ok(())
+}
+
+pub fn set_attachment(
+    conn: &Connection,
+    id: &str,
+    kind: Option<&str>,
+    value: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE notes SET attach_kind = ?2, attach_value = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, kind, value, now_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn sync_last_synced(conn: &Connection, id: &str) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT last_synced_at FROM sync_state WHERE note_id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn sync_mark_synced(conn: &Connection, id: &str, at: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_state (note_id, last_synced_at) VALUES (?1, ?2)
+         ON CONFLICT(note_id) DO UPDATE SET last_synced_at = excluded.last_synced_at",
+        params![id, at],
+    )?;
+    Ok(())
+}
+
+pub fn sync_tombstones(conn: &Connection) -> Result<Vec<(String, i64, String)>> {
+    let mut statement = conn.prepare(
+        "SELECT note_id, deleted_at, device_id FROM sync_tombstones ORDER BY deleted_at ASC",
+    )?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    let mut tombstones = Vec::new();
+    for tombstone in rows {
+        tombstones.push(tombstone?);
+    }
+    Ok(tombstones)
+}
+
+pub fn sync_set_tombstone(conn: &Connection, id: &str, deleted_at: i64, device_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO sync_tombstones (note_id, deleted_at, device_id) VALUES (?1, ?2, ?3)
+         ON CONFLICT(note_id) DO UPDATE SET deleted_at = excluded.deleted_at, device_id = excluded.device_id",
+        params![id, deleted_at, device_id],
+    )?;
+    Ok(())
+}
+
+pub fn sync_remove_tombstone(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM sync_tombstones WHERE note_id = ?1", params![id])?;
+    Ok(())
+}
+
+pub fn sync_prune_tombstones(conn: &Connection, older_than: i64) -> Result<()> {
+    conn.execute(
+        "DELETE FROM sync_tombstones WHERE deleted_at < ?1",
+        params![older_than],
     )?;
     Ok(())
 }

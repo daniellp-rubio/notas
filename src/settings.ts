@@ -1,5 +1,5 @@
-// The settings window: general options, the registered shortcuts, the
-// automatic backups, the export/import actions and a placeholder for sync.
+// The settings window: general options, shortcuts, backups, export/import and
+// the user-selected cloud-folder synchronization.
 
 import { listen } from "@tauri-apps/api/event";
 
@@ -36,7 +36,7 @@ function paint(): void {
   byId("settings-shell").replaceChildren(
     el("header", { class: "settings-head" }, [
       el("h1", { class: "settings-title", text: "Ajustes" }),
-      el("p", { class: "settings-sub", text: "Notas · versión 1.1.0" }),
+      el("p", { class: "settings-sub", text: "Notas · versión 2.0.0" }),
     ]),
     generalSection(),
     shortcutsSection(),
@@ -163,9 +163,45 @@ function backupsSection(): HTMLElement {
 }
 
 function syncSection(): HTMLElement {
-  return el("section", { class: "sect", attrs: { id: "sync" } }, [
-    el("h2", { class: "sect-title", text: "Sincronización" }),
-    el("p", { class: "sect-hint", text: "Sincronización: próximamente" }),
+  const sync = state.sync;
+  const folder = sync.folder
+    ? `Carpeta de sincronización: ${sync.folder}`
+    : "Carpeta de sincronización: no elegida";
+  const status = sync.error
+    ? `Error: ${sync.error}`
+    : `Última sincronización: ${sync.last_sync_at ? formatDate(sync.last_sync_at) : "todavía no hay ninguna"}`;
+  const choose = button("Elegir carpeta…", () => void runSync(async () => {
+    const picked = await api.chooseSyncFolder();
+    if (picked) toast("Sincronización activada");
+  }), "primary");
+  const now = button("Sincronizar ahora", () => void runSync(async () => {
+    const result = await api.syncNow();
+    toast(`${result.synced} notas sincronizadas${result.conflicts ? ` · ${result.conflicts} conflictos` : ""}`);
+  }));
+  now.disabled = !sync.folder;
+  const disable = button("Desactivar", () => void runSync(async () => {
+    await api.disableSync();
+    toast("Sincronización desactivada");
+  }));
+  disable.disabled = !sync.folder;
+  const statusNode = el("p", {
+    class: `sect-hint${sync.error ? " sync-error" : ""}`,
+    text: status,
+  });
+  return section("sync", "Sincronización", [
+    el("p", { class: "sect-hint", text: folder }),
+    el("div", { class: "backup-actions" }, [choose, now, disable]),
+    statusNode,
+    el("p", {
+      class: "sect-hint",
+      text: sync.suggested_folder
+        ? `Sugerencia: ${sync.suggested_folder}`
+        : "Elige una carpeta privada de OneDrive, Drive u otro servicio.",
+    }),
+    el("p", {
+      class: "sect-hint",
+      text: "La carpeta guarda las notas bloqueadas cifradas y las desbloqueadas legibles en Notas.md.",
+    }),
   ]);
 }
 
@@ -201,6 +237,20 @@ async function run(action: () => Promise<void>): Promise<void> {
     buttons.forEach((node) => {
       node.disabled = false;
     });
+    void load();
+  }
+}
+
+async function runSync(action: () => Promise<void>): Promise<void> {
+  const buttons = document.querySelectorAll<HTMLButtonElement>("#sync .btn");
+  buttons.forEach((node) => {
+    node.disabled = true;
+  });
+  try {
+    await action();
+  } catch (error) {
+    toast(describeError(error));
+  } finally {
     void load();
   }
 }

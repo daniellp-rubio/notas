@@ -25,6 +25,7 @@ export interface NoteView {
   unlocked: boolean;
   always_on_top: boolean;
   reminder_at: number | null;
+  attachment: string | null;
   x: number;
   y: number;
   width: number;
@@ -49,6 +50,25 @@ export interface SettingsState {
   last_backup_at: number | null;
   backups: BackupEntry[];
   shortcuts: ShortcutInfo[];
+  sync: SyncStatus;
+}
+
+export interface SyncStatus {
+  folder: string | null;
+  suggested_folder: string | null;
+  last_sync_at: number | null;
+  error: string | null;
+}
+
+export interface SyncResult {
+  synced: number;
+  conflicts: number;
+  skipped: number;
+}
+
+export interface AttachableWindow {
+  title: string;
+  exe: string;
 }
 
 export interface ImportSummary {
@@ -102,6 +122,14 @@ export const api = {
   openList: () => invoke<void>("open_list"),
   openSettings: () => invoke<void>("open_settings"),
   settingsState: () => invoke<SettingsState>("settings_state"),
+  chooseSyncFolder: (path: string | null = null) =>
+    invoke<SyncStatus | null>("choose_sync_folder", { path }),
+  disableSync: () => invoke<void>("disable_sync"),
+  syncNow: () => invoke<SyncResult>("sync_now"),
+  listAttachableWindows: () => invoke<AttachableWindow[]>("list_attachable_windows"),
+  attachNote: (id: string, kind: "exe" | "title", value: string) =>
+    invoke<void>("attach_note", { id, kind, value }),
+  detachNote: (id: string) => invoke<void>("detach_note", { id }),
   autostartEnabled: () => invoke<boolean>("autostart_enabled"),
   setAutostart: (enabled: boolean) => invoke<boolean>("set_autostart", { enabled }),
   backupNow: () => invoke<string>("backup_now"),
