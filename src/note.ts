@@ -1034,6 +1034,8 @@ async function refresh(): Promise<void> {
     const next = await api.getNote(note.id);
     const structural =
       next.mode !== note.mode || next.locked !== note.locked || next.unlocked !== note.unlocked;
+    const contentChanged =
+      next.text !== note.text || JSON.stringify(next.items) !== JSON.stringify(note.items);
     note.color = next.color;
     note.always_on_top = next.always_on_top;
     note.tags = next.tags;
@@ -1041,7 +1043,7 @@ async function refresh(): Promise<void> {
     note.visible = next.visible;
     note.attachment = next.attachment;
     note.title = next.title;
-    if (structural) {
+    if (structural || contentChanged) {
       note.mode = next.mode;
       note.locked = next.locked;
       note.unlocked = next.unlocked;

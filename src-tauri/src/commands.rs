@@ -750,19 +750,6 @@ pub fn settings_state(app: AppHandle, state: State<'_, AppState>) -> Result<Sett
     })
 }
 
-/// Rebuild windows after a remote merge without holding the IPC response open.
-fn reload_after_sync(app: &AppHandle) {
-    let handle = app.clone();
-    let _ = std::thread::Builder::new()
-        .name("notas-sync-reload".to_string())
-        .spawn(move || {
-            let state = handle.state::<AppState>();
-            if let Err(error) = windows::reload_all(&handle, &state) {
-                eprintln!("[notas] no se pudieron recargar las notas sincronizadas: {error}");
-            }
-            attachments::refresh(&handle);
-        });
-}
 
 /// Select and enable a cloud parent folder. Synchronization itself is explicit
 /// and runs on the file worker so the native picker never blocks WebView IPC.
@@ -785,7 +772,7 @@ pub fn choose_sync_folder(
         sync::sync_now(&conn, &folder, &device)?;
         let status = sync::status(&conn)?;
         drop(conn);
-        reload_after_sync(&handle);
+        let _ = handle.emit("notes-changed", "");
         Ok(Some(status))
     })
 }
@@ -809,7 +796,7 @@ pub fn sync_now(app: AppHandle) -> Result<sync::SyncResult, String> {
         let device = sync::device_id(&conn)?;
         let result = sync::sync_now(&conn, PathBuf::from(folder).as_path(), &device)?;
         drop(conn);
-        reload_after_sync(&handle);
+        let _ = handle.emit("notes-changed", "");
         Ok(result)
     })
 }
