@@ -116,7 +116,7 @@ npm run tauri build
 
 El resultado queda en:
 
-- `src-tauri/target/release/bundle/nsis/Notas_2.0.1_x64-setup.exe` — instalador NSIS
+- `src-tauri/target/release/bundle/nsis/Notas_2.0.2_x64-setup.exe` — instalador NSIS
   para el usuario actual (no pide permisos de administrador).
 
 Comprobaciones del proyecto:

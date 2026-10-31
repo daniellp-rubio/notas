@@ -17,6 +17,11 @@
 //! creation becomes a normal queued event.
 
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_SHOWWINDOW,
+};
 
 use crate::db::{self, Note};
 use crate::state::AppState;
@@ -261,10 +266,33 @@ pub fn restore_note_z_order(app: &AppHandle, id: &str, pinned: bool) {
     }
 }
 
-/// Tauri applies this through the native window backend. On Windows that maps
-/// to the window's Win32 z-order without activating it.
+/// Synchronize Tauri's state with the native z-order. `SetWindowPos` is needed
+/// after a rule-driven re-show because WebView2 can otherwise remain below the
+/// foreground window even with the topmost extended style.
 fn set_attachment_z_order(window: &WebviewWindow, topmost: bool) {
     let _ = window.set_always_on_top(topmost);
+    #[cfg(windows)]
+    {
+        let Ok(hwnd) = window.hwnd() else {
+            return;
+        };
+        let flags = SWP_NOMOVE
+            | SWP_NOSIZE
+            | SWP_NOACTIVATE
+            | if topmost {
+                SWP_SHOWWINDOW
+            } else {
+                Default::default()
+            };
+        let insert_after = if topmost {
+            HWND_TOPMOST
+        } else {
+            HWND_NOTOPMOST
+        };
+        unsafe {
+            let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
+        }
+    }
 }
 
 /// Show every note (the manager window is left alone). Attachment-controlled
