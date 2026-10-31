@@ -218,8 +218,9 @@ pub fn show_note(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Show an attachment-controlled note above the matched application without
-/// activating it. Creating a missing webview still uses the safe worker hop.
+/// Show an attachment-controlled note without activating it. The foreground
+/// observer reapplies its native z-order separately, even when this window is
+/// already visible.
 pub fn show_attached_note(app: &AppHandle, id: &str) {
     if app.get_webview_window(&note_label(id)).is_some() {
         let handle = app.clone();
@@ -237,6 +238,24 @@ pub fn show_attached_note(app: &AppHandle, id: &str) {
     } else {
         spawn_attached_note(app, id);
     }
+}
+
+/// Reapply an attached note's z-order without changing its visibility. This
+/// runs for every matching foreground observation, so an already-visible note
+/// is raised above the matched application as well.
+pub fn enforce_attached_note_z_order(app: &AppHandle, id: &str) {
+    if app.get_webview_window(&note_label(id)).is_none() {
+        return;
+    }
+    let handle = app.clone();
+    let app = handle.clone();
+    let id = id.to_string();
+    let _ = handle.run_on_main_thread(move || {
+        let Some(window) = app.get_webview_window(&note_label(&id)) else {
+            return;
+        };
+        set_attachment_z_order(&window, true);
+    });
 }
 
 /// Hide an attachment-controlled note and undo its temporary z-order change.

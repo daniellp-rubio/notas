@@ -89,9 +89,22 @@ pub fn refresh(app: &AppHandle) {
         let show = note.visible && active.as_ref().is_some_and(|current| matches(kind, value, current));
         if show {
             windows::show_attached_note(app, &note.id);
+            windows::enforce_attached_note_z_order(app, &note.id);
         } else {
             windows::hide_attached_note(app, &note.id, note.always_on_top);
         }
+    }
+}
+
+/// Apply an attachment immediately after it is saved. A note being edited has
+/// our process in the foreground, so the normal refresh intentionally leaves
+/// it visible; pre-elevating it here preserves its rule-driven z-order for the
+/// first foreground change to the matched program.
+pub fn refresh_after_attach(app: &AppHandle, id: &str) {
+    if platform::foreground_is_ours() {
+        windows::enforce_attached_note_z_order(app, id);
+    } else {
+        refresh(app);
     }
 }
 

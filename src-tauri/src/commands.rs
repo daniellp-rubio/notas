@@ -461,7 +461,7 @@ pub fn attach_note(
         find(&conn, &id)?;
         db::set_attachment(&conn, &id, Some(&kind), Some(value)).map_err(err)?;
     }
-    attachments::refresh(&app);
+    attachments::refresh_after_attach(&app, &id);
     note_changed(&app, &id);
     Ok(())
 }

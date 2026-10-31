@@ -1,6 +1,6 @@
 [package]
 name = "notas"
-version = "2.0.2"
+version = "2.0.3"
 description = "Sticky notes for the Windows desktop"
 authors = ["Dafel"]
 license = "MIT"
