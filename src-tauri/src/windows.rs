@@ -230,6 +230,12 @@ pub fn show_attached_note(app: &AppHandle, id: &str) {
             let Some(window) = app.get_webview_window(&note_label(&id)) else {
                 return;
             };
+            // A note that is already visible but was never raised by its rule
+            // (it was on screen while the user edited it) ignores HWND_TOPMOST:
+            // Windows only applies it here through a hide/show cycle.
+            if window.is_visible().unwrap_or(false) && !is_native_topmost(&window) {
+                let _ = window.hide();
+            }
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_skip_taskbar(true);
@@ -311,6 +317,23 @@ fn set_attachment_z_order(window: &WebviewWindow, topmost: bool) {
         unsafe {
             let _ = SetWindowPos(hwnd, Some(insert_after), 0, 0, 0, 0, flags);
         }
+    }
+}
+
+/// Whether Windows currently has the note in the topmost band.
+fn is_native_topmost(window: &WebviewWindow) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongW, GWL_EXSTYLE, WS_EX_TOPMOST};
+        let Ok(hwnd) = window.hwnd() else {
+            return false;
+        };
+        unsafe { (GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        true
     }
 }
 
