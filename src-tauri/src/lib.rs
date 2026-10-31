@@ -19,9 +19,8 @@ use tauri::{Emitter, Manager};
 
 use state::AppState;
 
-/// Name of the app in Windows: the `Run` value written for autostart and what
-/// Task Manager shows at startup. Fixed so the registry entry never changes
-/// with the package name.
+/// Name of the app in Windows: the Startup shortcut and the `Run` value older
+/// versions wrote (migrated at startup).
 pub const APP_NAME: &str = "Notas";
 
 /// First run: leave one note on screen instead of an empty desktop.
@@ -48,14 +47,6 @@ fn seed_first_run(conn: &rusqlite::Connection) -> Result<(), db::DbError> {
 }
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    // Registered here (not on the builder) so the plugin state exists before
-    // the first-run default reads it.
-    app.handle().plugin(
-        tauri_plugin_autostart::Builder::new()
-            .app_name(APP_NAME)
-            .build(),
-    )?;
-
     let data_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&data_dir)?;
     let conn = db::open(&data_dir.join("notas.db"))?;

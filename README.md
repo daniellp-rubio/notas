@@ -143,9 +143,20 @@ de texto en claro quedan vacías. La base tiene `schema_version` (`PRAGMA user_v
 y se migra de forma idempotente al arrancar. Para empezar de cero basta con cerrar la
 aplicación y borrar ese archivo.
 
-«Iniciar con Windows» no se guarda en la base: es un valor llamado `Notas` bajo
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, que Windows consulta al iniciar
-sesión. Al desactivarlo desde la bandeja, ese valor se elimina.
+«Iniciar con Windows» no se guarda en la base: es un acceso directo `Notas.lnk` en la
+carpeta Inicio del usuario (`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`),
+que Windows abre al iniciar sesión. Al desactivarlo desde la bandeja, ese acceso
+directo se borra. Las versiones anteriores a la 2.0.4 usaban un valor en
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; Microsoft Defender lo marcaba
+como sospechoso en un programa sin firma, así que al arrancar se elimina y se cambia
+por el acceso directo.
+
+### Aviso de Windows Defender o SmartScreen
+
+El instalador y el programa no tienen firma digital. Por eso Windows puede mostrar
+«Windows protegió tu PC» al instalar («Más información» → «Ejecutar de todas formas»).
+El código es público en este repositorio para que cualquiera pueda revisarlo o
+compilarlo.
 
 
 ## Cómo funciona la sincronización
