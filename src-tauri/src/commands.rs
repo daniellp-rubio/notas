@@ -468,11 +468,13 @@ pub fn attach_note(
 
 #[tauri::command(async)]
 pub fn detach_note(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
-    {
+    let note = {
         let conn = state.conn()?;
-        find(&conn, &id)?;
+        let note = find(&conn, &id)?;
         db::set_attachment(&conn, &id, None, None).map_err(err)?;
-    }
+        note
+    };
+    windows::restore_note_z_order(&app, &id, note.always_on_top);
     windows::show_note(&app, &id)?;
     note_changed(&app, &id);
     Ok(())

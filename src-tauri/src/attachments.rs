@@ -87,11 +87,10 @@ pub fn refresh(app: &AppHandle) {
             continue;
         };
         let show = note.visible && active.as_ref().is_some_and(|current| matches(kind, value, current));
-        let label = windows::note_label(&note.id);
         if show {
-            windows::show_note_quietly(app, &note.id);
-        } else if let Some(window) = app.get_webview_window(&label) {
-            let _ = window.hide();
+            windows::show_attached_note(app, &note.id);
+        } else {
+            windows::hide_attached_note(app, &note.id, note.always_on_top);
         }
     }
 }
@@ -101,8 +100,8 @@ mod platform {
     use std::collections::HashMap;
     use std::path::Path;
 
-    use windows::core::PWSTR;
-    use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
+    use windows::core::{BOOL, PWSTR};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };

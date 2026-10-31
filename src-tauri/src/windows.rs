@@ -16,7 +16,7 @@
 //! From a worker thread the same call goes through the event loop proxy, so the
 //! creation becomes a normal queued event.
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 use crate::db::{self, Note};
 use crate::state::AppState;
@@ -123,17 +123,26 @@ fn worker<F: FnOnce() + Send + 'static>(name: &str, job: F) {
 
 /// Open a note window on the event loop (safe from any thread and any handler).
 pub fn spawn_note(app: &AppHandle, note_id: &str) {
+    spawn_note_with_z_order(app, note_id, false);
+}
+
+/// Open a matching note window and place it above the foreground application.
+fn spawn_attached_note(app: &AppHandle, note_id: &str) {
+    spawn_note_with_z_order(app, note_id, true);
+}
+
+fn spawn_note_with_z_order(app: &AppHandle, note_id: &str, attached: bool) {
     let handle = app.clone();
     let id = note_id.to_string();
     worker("notas-note-window", move || {
         // Read the row off the main thread: the event loop only builds windows.
         let note = {
             let state = handle.state::<AppState>();
-            let found = match state.conn() {
+            let note = match state.conn() {
                 Ok(conn) => db::get(&conn, &id).ok().flatten(),
                 Err(_) => None,
             };
-            found
+            note
         };
         let Some(note) = note else {
             return;
@@ -145,6 +154,15 @@ pub fn spawn_note(app: &AppHandle, note_id: &str) {
                     "[notas] no se pudo abrir la ventana de la nota {}: {error}",
                     note.id
                 );
+                return;
+            }
+            if attached {
+                if let Some(window) = app.get_webview_window(&note_label(&note.id)) {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_skip_taskbar(true);
+                    set_attachment_z_order(&window, true);
+                }
             }
         }) {
             eprintln!("[notas] no se pudo encolar la ventana de la nota {id}: {error}");
@@ -195,16 +213,58 @@ pub fn show_note(app: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Show an attachment-controlled note without stealing focus from the matched
-/// application. Creating a missing webview still uses the safe worker hop.
-pub fn show_note_quietly(app: &AppHandle, id: &str) {
-    if let Some(window) = app.get_webview_window(&note_label(id)) {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_skip_taskbar(true);
+/// Show an attachment-controlled note above the matched application without
+/// activating it. Creating a missing webview still uses the safe worker hop.
+pub fn show_attached_note(app: &AppHandle, id: &str) {
+    if app.get_webview_window(&note_label(id)).is_some() {
+        let handle = app.clone();
+        let app = handle.clone();
+        let id = id.to_string();
+        let _ = handle.run_on_main_thread(move || {
+            let Some(window) = app.get_webview_window(&note_label(&id)) else {
+                return;
+            };
+            let _ = window.show();
+            let _ = window.unminimize();
+            let _ = window.set_skip_taskbar(true);
+            set_attachment_z_order(&window, true);
+        });
     } else {
-        spawn_note(app, id);
+        spawn_attached_note(app, id);
     }
+}
+
+/// Hide an attachment-controlled note and undo its temporary z-order change.
+/// A note explicitly pinned by the user remains topmost while hidden.
+pub fn hide_attached_note(app: &AppHandle, id: &str, pinned: bool) {
+    if app.get_webview_window(&note_label(id)).is_none() {
+        return;
+    }
+    let handle = app.clone();
+    let app = handle.clone();
+    let id = id.to_string();
+    let _ = handle.run_on_main_thread(move || {
+        let Some(window) = app.get_webview_window(&note_label(&id)) else {
+            return;
+        };
+        if !pinned {
+            set_attachment_z_order(&window, false);
+        }
+        let _ = window.hide();
+    });
+}
+
+/// Restore the z-order selected by the user after removing an attachment.
+pub fn restore_note_z_order(app: &AppHandle, id: &str, pinned: bool) {
+    if let Some(window) = app.get_webview_window(&note_label(id)) {
+        set_attachment_z_order(&window, pinned);
+    }
+}
+
+/// Tauri applies this through the native window backend. On Windows that maps
+/// to the window's Win32 z-order without activating it.
+fn set_attachment_z_order(window: &WebviewWindow, topmost: bool) {
+    let _ = window.set_always_on_top(topmost);
 }
 
 /// Show every note (the manager window is left alone). Attachment-controlled
